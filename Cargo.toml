@@ -1,0 +1,11 @@
+[package]
+name = "drumkick"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.6.6", features = ["derive"] }
+kira = "0.12.3"
+pest = "2.8.8"
+pest_derive = "2.8.8"
+thiserror = "2.0.20"
