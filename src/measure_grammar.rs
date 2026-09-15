@@ -24,23 +24,24 @@ pub enum MeasureParseError {
     LogicalError(String),
 }
 
-static BEAT_FRACTIONS: LazyLock<HashMap<&str, f64>> = LazyLock::new(|| {
-    HashMap::from([
-        ("e", 0.25),
-        ("&", 0.5),
-        ("and", 0.5),
-        ("ah", 0.75),
-        ("uh", 0.75),
-        ("a", 0.75),
-        ("trip", 1.0 / 3.0),
-        ("tri", 1.0 / 3.0),
-        ("let", 2.0 / 3.0),
-        ("plet", 2.0 / 3.0),
-    ])
-});
+pub(crate) static BEAT_FRACTIONS: &[(&str, f64)] = &[
+    ("e", 0.25),
+    ("&", 0.5),
+    ("and", 0.5),
+    ("ah", 0.75),
+    ("uh", 0.75),
+    ("a", 0.75),
+    ("trip", 1.0 / 3.0),
+    ("tri", 1.0 / 3.0),
+    ("let", 2.0 / 3.0),
+    ("plet", 2.0 / 3.0),
+];
+
+static BEAT_FRACTION_MAP: LazyLock<HashMap<&str, f64>> =
+    LazyLock::new(|| BEAT_FRACTIONS.iter().copied().collect());
 
 fn name_to_beat_fraction(name: &str) -> f64 {
-    *(BEAT_FRACTIONS
+    *(BEAT_FRACTION_MAP
         .get(name)
         .unwrap_or_else(|| panic!("beat fraction defined for name: {}", name)))
 }
@@ -119,13 +120,14 @@ fn parse_measure_ast(measure_ast: Pair<Rule>) -> Result<Vec<BeatSpec>, String> {
     Ok(beats)
 }
 
-fn backtick_quote(k: &str) -> String {
+pub(crate) fn backtick_quote(k: &str) -> String {
     format!("`{}`", k.replace("`", "\\`"))
 }
 
-fn join_backtick_quoted<'a>(items: impl Iterator<Item = &'a str>) -> String {
+pub(crate) fn join_backtick_quoted<'a>(items: impl Iterator<Item = &'a str>) -> String {
     items.map(backtick_quote).collect::<Vec<_>>().join(", ")
 }
+
 fn rename_rule(rule: &Rule, all_sample_names: &Vec<&str>) -> String {
     match rule {
         Rule::sample_name => {
@@ -135,7 +137,8 @@ fn rename_rule(rule: &Rule, all_sample_names: &Vec<&str>) -> String {
         Rule::samples_list => "comma-separated list of samples (e.g. `kick,hat`)".to_string(),
         Rule::beat_no => "beat no (`1`, `2`, etc)".to_string(),
         Rule::beat_fraction_name => {
-            let all_fraction_names = join_backtick_quoted(BEAT_FRACTIONS.keys().cloned());
+            let all_fraction_names =
+                join_backtick_quoted(BEAT_FRACTIONS.iter().map(|(k, _)| k).cloned());
             format!("beat fraction name (one of: {})", all_fraction_names)
         }
         Rule::beat_fraction => "beat fraction (e.g. `1/3`)".to_string(),

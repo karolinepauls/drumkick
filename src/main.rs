@@ -16,6 +16,8 @@ use std::fmt;
 use std::{thread, time};
 use thiserror::Error;
 
+mod embedded_samples;
+use embedded_samples::{EMBEDDED_SAMPLE_NAMES, get_embedded_sample, get_embedded_sample_names};
 mod measure_grammar;
 use measure_grammar::*;
 
@@ -33,9 +35,38 @@ impl ExitCodes {
 }
 
 #[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
+#[command(version, about, long_about = None, next_line_help = true)]
 struct Args {
-    #[arg(default_value_t = "1:hat,kick e:hat and:hat ah:hat 2:hat,snare 3:hat,kick 4:hat,snare".to_string())]
+    #[arg(
+        default_value_t = "1:CLICK 2:click, 3:click, 4:click".to_string(),
+        long_help = format!(
+            "Rhythm track specification in the form of <PLACEMENT>:<SAMPLE>[,<SAMPLE>...]
+
+PLACEMENT can be a:
+- beat number (`1`, `2`, ...)
+- beat fraction name (e.g. `and`)
+- or a literal fraction like `1/3`.
+
+Supported beat fraction names are:
+{}
+
+The following SAMPLEs are always available:
+{}
+Other samples must be provided using --sample options.
+",
+            BEAT_FRACTIONS
+                .iter()
+                .map(|(name, value)| format!("- {name_q} → {value}", name_q = backtick_quote(name)))
+                .collect::<Vec<_>>()
+                .join("\n"),
+
+            EMBEDDED_SAMPLE_NAMES
+                .iter()
+                .map(|name| format!("- {name_q}", name_q = backtick_quote(name)))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    )]
     measure: String,
 
     #[arg(
@@ -76,6 +107,7 @@ being given insufficient time to produce the audio wave, resulting in buffer und
 struct TrackSpec<'a> {
     beats_per_minute: f64,
     measure_beats: Vec<BeatSpec>,
+    ordered_samples: Vec<&'a str>,
     sample_locations: HashMap<&'a str, &'a str>,
 }
 
@@ -117,13 +149,11 @@ impl fmt::Display for ArgsParseError {
 
 #[derive(Error, Debug)]
 enum SampleLoadingError {
-    #[error("no such sample")]
-    NoSuchSample,
-    #[error("samples loading failed {0}")]
+    #[error("no such sample - available sample names are: {}", join_backtick_quoted(.0.iter().map(String::as_ref)))]
+    NoSuchSample(Vec<String>),
+    #[error("sample loading failed {0}")]
     FromFile(FromFileError),
 }
-
-const MIN_MEASURES: u64 = 4;
 
 #[derive(Error, Debug)]
 #[error(
@@ -133,6 +163,8 @@ const MIN_MEASURES: u64 = 4;
 struct SampleLoadingErrors {
     errors: Vec<(String, SampleLoadingError)>,
 }
+
+const MIN_MEASURES: u64 = 4;
 
 fn unwrap_or_terminate<T, E: fmt::Display>(r: Result<T, E>, error_code: i32) -> T {
     match r {
@@ -146,14 +178,13 @@ fn unwrap_or_terminate<T, E: fmt::Display>(r: Result<T, E>, error_code: i32) -> 
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-
     set_error_detail(true);
+
     let track_spec =
         unwrap_or_terminate(interpret_args(&args), ExitCodes::CantInterpretArgs.code());
-    let beats = unwrap_or_terminate(
-        load_samples(&track_spec.measure_beats, &track_spec.sample_locations),
-        ExitCodes::CantLoadSamples.code(),
-    );
+
+    let beats = unwrap_or_terminate(load_samples(&track_spec), ExitCodes::CantLoadSamples.code());
+
     let beats_in_measure = beats[beats.len() - 1].time.floor() as u64;
     eprintln!("Measure has {} beats", beats_in_measure);
     let track = Track {
@@ -245,9 +276,19 @@ fn parse_sample_locations(samples: &[String]) -> Result<HashMap<&str, &str>, Sam
 fn interpret_args<'a>(args: &'a Args) -> Result<TrackSpec<'a>, Box<ArgsParseError>> {
     let sample_locations = parse_sample_locations(&args.samples);
 
-    let all_sample_names: Vec<&str> = sample_locations
-        .as_ref()
-        .map_or_else(|_e| Vec::new(), |locs| locs.keys().copied().collect());
+    // Build a vec of all sample names, embedded and provided, for error reporting.
+    let mut all_sample_names = get_embedded_sample_names();
+    let mut seen_sample_names: HashSet<_> = all_sample_names.iter().copied().collect();
+
+    // Sample locations may have failed to load, in which case we won't append them to all_sample_names.
+    if let Ok(locations) = sample_locations.as_ref() {
+        for key in locations.keys() {
+            let new = seen_sample_names.insert(key);
+            if new {
+                all_sample_names.push(key);
+            }
+        }
+    }
 
     let measure_beats = parse_measure(&args.measure, &all_sample_names);
 
@@ -255,6 +296,7 @@ fn interpret_args<'a>(args: &'a Args) -> Result<TrackSpec<'a>, Box<ArgsParseErro
         (Ok(sample_locations), Ok(measure_beats)) => Ok(TrackSpec {
             beats_per_minute: args.bpm,
             measure_beats,
+            ordered_samples: all_sample_names,
             sample_locations,
         }),
         (sample_locations, measure_beats) => Err(Box::new(ArgsParseError {
@@ -264,31 +306,43 @@ fn interpret_args<'a>(args: &'a Args) -> Result<TrackSpec<'a>, Box<ArgsParseErro
     }
 }
 
-fn load_samples(
-    beat_specs: &[BeatSpec],
-    sample_locations: &HashMap<&str, &str>,
-) -> Result<Vec<Beat>, SampleLoadingErrors> {
-    let sample_names: HashSet<_> = beat_specs
+fn load_samples(track_spec: &TrackSpec) -> Result<Vec<Beat>, SampleLoadingErrors> {
+    let sample_names: HashSet<_> = track_spec
+        .measure_beats
         .iter()
         .flat_map(|bs| &bs.samples)
         .map(|s| s.as_str())
         .collect();
-    let mut samples: HashMap<&str, StaticSoundData> = HashMap::new();
+    let mut name_to_sample: HashMap<&str, StaticSoundData> = HashMap::new();
     let mut errors: Vec<(&str, SampleLoadingError)> = Vec::new();
 
     for name in sample_names {
-        if let Some(location) = sample_locations.get(name) {
-            match StaticSoundData::from_file(location) {
-                Ok(sound_data) => {
-                    eprintln!("Loaded sample {} {}", name, sound_data.sample_rate);
-                    samples.insert(name, sound_data);
-                }
-                Err(err) => {
-                    errors.push((name, SampleLoadingError::FromFile(err)));
-                }
+        let sound_data = track_spec
+            .sample_locations
+            .get(name)
+            .map(StaticSoundData::from_file)
+            // Check for a sample embedded in the binary in case it isn't present in sample_locations.
+            .or_else(|| get_embedded_sample(name).map(StaticSoundData::from_cursor));
+
+        match sound_data {
+            Some(Ok(sound_data)) => {
+                eprintln!("Loaded sample {} {}", name, sound_data.sample_rate);
+                name_to_sample.insert(name, sound_data);
             }
-        } else {
-            errors.push((name, SampleLoadingError::NoSuchSample));
+            Some(Err(err)) => {
+                errors.push((name, SampleLoadingError::FromFile(err)));
+            }
+            None => errors.push((
+                name,
+                SampleLoadingError::NoSuchSample(
+                    track_spec
+                        .ordered_samples
+                        .iter()
+                        .cloned()
+                        .map(String::from)
+                        .collect::<Vec<String>>(),
+                ),
+            )),
         }
     }
 
@@ -301,14 +355,15 @@ fn load_samples(
         });
     }
 
-    Ok(beat_specs
+    Ok(track_spec
+        .measure_beats
         .iter()
         .map(|bs| Beat {
             time: bs.time,
             samples: bs
                 .samples
                 .iter()
-                .map(|sample_name| samples.get(sample_name.as_str()).unwrap().clone())
+                .map(|sample_name| name_to_sample.get(sample_name.as_str()).unwrap().clone())
                 .collect(),
         })
         .collect())

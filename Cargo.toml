@@ -9,3 +9,4 @@ kira = "0.12.3"
 pest = "2.8.8"
 pest_derive = "2.8.8"
 thiserror = "2.0.20"
+symphonia-core = "0.6.0"  # needs to be synchronised with kira

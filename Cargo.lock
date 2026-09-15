@@ -283,6 +283,7 @@ dependencies = [
  "kira",
  "pest",
  "pest_derive",
+ "symphonia-core",
  "thiserror 2.0.20",
 ]
 
