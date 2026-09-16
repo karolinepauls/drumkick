@@ -11,7 +11,15 @@ Features
 - Any beat count supported
 - Any beat subdivision (want quintuplets - that's as simple as ``1/5``)
 
-Unsupported
+**Unsupported but planned:**
+
+- shifting meters and looping
+
+- polyrhythms (measures played in parallel)
+
+- BPM changes
+
+- "human" timing feel
 
 Examples
 --------
