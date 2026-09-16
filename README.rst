@@ -45,4 +45,6 @@ Patterns
 
 - **6/8**: ``'1:DRIP 2:click 3:click 4:CLICK 5:click 6:click'``
 
-- **4/4 quarter note triplets**: `'1:DRIP trip:click let:click 2:CLICK trip:click let:click 3:CLICK trip:click let:click 4:CLICK trip:click let:click'``
+- **4/4 quarter note triplets**: ``'1:DRIP trip:click let:click 2:CLICK trip:click let:click 3:CLICK trip:click let:click 4:CLICK trip:click let:click'``
+
+- **quintuplets**: ``'1:CLICK 1/5:click 2/5:click 3/5:click 4/5:click'``

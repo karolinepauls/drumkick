@@ -1,6 +1,6 @@
-use pest::Parser as PestParser;
 use pest::error::Error as PestError;
 use pest::iterators::Pair;
+use pest::Parser as PestParser;
 use pest_derive::Parser as PestParser;
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -10,13 +10,13 @@ use thiserror::Error;
 #[grammar = "measure.pest"]
 struct MeasureGrammar;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct BeatSpec {
     pub samples: Vec<String>,
     pub time: f64,
 }
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, PartialEq)]
 pub enum MeasureParseError {
     #[error("{0}")]
     SyntaxError(PestError<Rule>),
@@ -71,10 +71,16 @@ fn parse_measure_ast(measure_ast: Pair<Rule>) -> Result<Vec<BeatSpec>, String> {
                                         + name_to_beat_fraction(placement.as_str());
                                 }
                                 Rule::beat_fraction => {
-                                    new_position = position.floor()
-                                        + placement.as_str().parse::<f64>().unwrap();
+                                    let fraction_str = placement.as_str();
+                                    let (numerator_str, denominator_str) =
+                                        fraction_str.split_once('/').expect("fraction string");
+                                    let numerator: f64 =
+                                        numerator_str.parse().expect("numerator f64");
+                                    let denominator: f64 =
+                                        denominator_str.parse().expect("denominator f64");
+                                    new_position = position.floor() + numerator / denominator;
                                 }
-                                _ => unreachable!("in placement {}", placement.as_str()),
+                                _ => unreachable!("in beat placement {}", placement.as_str()),
                             }
                         }
                         Rule::samples_list => {
@@ -128,7 +134,7 @@ pub(crate) fn join_backtick_quoted<'a>(items: impl Iterator<Item = &'a str>) -> 
     items.map(backtick_quote).collect::<Vec<_>>().join(", ")
 }
 
-fn rename_rule(rule: &Rule, all_sample_names: &Vec<&str>) -> String {
+fn rename_rule(rule: &Rule, all_sample_names: &[&str]) -> String {
     match rule {
         Rule::sample_name => {
             let all_sample_names = join_backtick_quoted(all_sample_names.iter().cloned());
@@ -151,7 +157,7 @@ fn rename_rule(rule: &Rule, all_sample_names: &Vec<&str>) -> String {
 
 pub(crate) fn parse_measure(
     measure: &str,
-    all_sample_names: &Vec<&str>,
+    all_sample_names: &[&str],
 ) -> Result<Vec<BeatSpec>, MeasureParseError> {
     MeasureGrammar::parse(Rule::measure, measure)
         .map_err(|e| {
@@ -162,4 +168,287 @@ pub(crate) fn parse_measure(
         .and_then(|mut grammar| {
             parse_measure_ast(grammar.next().unwrap()).map_err(MeasureParseError::LogicalError)
         })
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use rstest::*;
+    use std::assert_matches;
+    const STANDARD_SAMPLE_NAMES: &[&str] = &["CLICK", "click", "DRIP", "drip"];
+
+    #[rstest]
+    fn test_parse_measure_simple(
+        #[values(
+            "1:click",
+            " 1:click",
+            "  1:click",
+            "1:click ",
+            "1:click  ",
+            "  1:click  "
+        )]
+        measure_str: &str,
+    ) {
+        assert_eq!(
+            parse_measure(measure_str, STANDARD_SAMPLE_NAMES).unwrap(),
+            [BeatSpec {
+                samples: vec!["click".to_string()],
+                time: 1.0,
+            }]
+        );
+    }
+
+    #[rstest]
+    fn test_parse_measure_beats() {
+        assert_eq!(
+            parse_measure("1:CLICK 2:click 3:click", STANDARD_SAMPLE_NAMES).unwrap(),
+            [
+                BeatSpec {
+                    samples: vec!["CLICK".to_string()],
+                    time: 1.0,
+                },
+                BeatSpec {
+                    samples: vec!["click".to_string()],
+                    time: 2.0,
+                },
+                BeatSpec {
+                    samples: vec!["click".to_string()],
+                    time: 3.0,
+                },
+            ]
+        );
+    }
+
+    #[rstest]
+    fn test_parse_measure_ands() {
+        assert_eq!(
+            parse_measure("1:DRIP and:click 2:CLICK &:click", STANDARD_SAMPLE_NAMES).unwrap(),
+            [
+                BeatSpec {
+                    samples: vec!["DRIP".to_string()],
+                    time: 1.0,
+                },
+                BeatSpec {
+                    samples: vec!["click".to_string()],
+                    time: 1.5,
+                },
+                BeatSpec {
+                    samples: vec!["CLICK".to_string()],
+                    time: 2.0,
+                },
+                BeatSpec {
+                    samples: vec!["click".to_string()],
+                    time: 2.5,
+                },
+            ]
+        );
+    }
+
+    #[rstest]
+    fn test_parse_measure_e_and_ah(
+        #[values(
+            "1:DRIP e:hat and:click a:hat 2:CLICK",
+            "1:DRIP e:hat &:click ah:hat 2:CLICK",
+            "1:DRIP e:hat &:click uh:hat 2:CLICK"
+        )]
+        measure_str: &str,
+    ) {
+        assert_eq!(
+            parse_measure(measure_str, STANDARD_SAMPLE_NAMES).unwrap(),
+            [
+                BeatSpec {
+                    samples: vec!["DRIP".to_string()],
+                    time: 1.0,
+                },
+                BeatSpec {
+                    samples: vec!["hat".to_string()],
+                    time: 1.25,
+                },
+                BeatSpec {
+                    samples: vec!["click".to_string()],
+                    time: 1.5,
+                },
+                BeatSpec {
+                    samples: vec!["hat".to_string()],
+                    time: 1.75,
+                },
+                BeatSpec {
+                    samples: vec!["CLICK".to_string()],
+                    time: 2.0,
+                },
+            ]
+        );
+    }
+
+    #[rstest]
+    fn test_parse_measure_triplets(
+        #[values(
+            "1:DRIP tri:hat plet:click 2:CLICK",
+            "1:DRIP trip:hat let:click 2:CLICK",
+            "1:DRIP trip:hat plet:click 2:CLICK"
+        )]
+        measure_str: &str,
+    ) {
+        assert_eq!(
+            parse_measure(measure_str, STANDARD_SAMPLE_NAMES).unwrap(),
+            [
+                BeatSpec {
+                    samples: vec!["DRIP".to_string()],
+                    time: 1.0,
+                },
+                BeatSpec {
+                    samples: vec!["hat".to_string()],
+                    time: 1.0 + 1.0 / 3.0,
+                },
+                BeatSpec {
+                    samples: vec!["click".to_string()],
+                    time: 1.0 + 2.0 / 3.0,
+                },
+                BeatSpec {
+                    samples: vec!["CLICK".to_string()],
+                    time: 2.0,
+                },
+            ]
+        );
+    }
+
+    #[rstest]
+    fn test_parse_measure_fractions() {
+        assert_eq!(
+            parse_measure(
+                "1:CLICK 1/5:click 2/5:click 3/5:click 4/5:click 2:CLICK",
+                STANDARD_SAMPLE_NAMES
+            )
+            .unwrap(),
+            [
+                BeatSpec {
+                    samples: vec!["CLICK".to_string()],
+                    time: 1.0,
+                },
+                BeatSpec {
+                    samples: vec!["click".to_string()],
+                    time: 1.0 + 1.0 / 5.0,
+                },
+                BeatSpec {
+                    samples: vec!["click".to_string()],
+                    time: 1.0 + 2.0 / 5.0,
+                },
+                BeatSpec {
+                    samples: vec!["click".to_string()],
+                    time: 1.0 + 3.0 / 5.0,
+                },
+                BeatSpec {
+                    samples: vec!["click".to_string()],
+                    time: 1.0 + 4.0 / 5.0,
+                },
+                BeatSpec {
+                    samples: vec!["CLICK".to_string()],
+                    time: 2.0,
+                },
+            ]
+        );
+    }
+
+    #[rstest]
+    fn test_parse_measure_multiple_samples() {
+        assert_eq!(
+            parse_measure("1:click,drip", STANDARD_SAMPLE_NAMES).unwrap(),
+            [BeatSpec {
+                samples: vec!["click".to_string(), "drip".to_string()],
+                time: 1.0,
+            }]
+        );
+
+        assert_eq!(
+            parse_measure(
+                "1:DRIP trip:hat,click plet:click,hat 2:CLICK",
+                STANDARD_SAMPLE_NAMES
+            )
+            .unwrap(),
+            [
+                BeatSpec {
+                    samples: vec!["DRIP".to_string()],
+                    time: 1.0,
+                },
+                BeatSpec {
+                    samples: vec!["hat".to_string(), "click".to_string()],
+                    time: 1.0 + 1.0 / 3.0,
+                },
+                BeatSpec {
+                    samples: vec!["click".to_string(), "hat".to_string()],
+                    time: 1.0 + 2.0 / 3.0,
+                },
+                BeatSpec {
+                    samples: vec!["CLICK".to_string()],
+                    time: 2.0,
+                },
+            ]
+        );
+    }
+
+    #[rstest]
+    #[case("1:click 2:click 1:click", "beat number decreased: 2 → 1")]
+    #[case("1:click and:click e:click", "beat number decreased: 1.5 → 1.25")]
+    #[case(
+        "1:click 2/3:click 1/3:click ",
+        "beat number decreased: 1.6666666666666665 → 1.3333333333333333"
+    )]
+    fn test_parse_measure_error_beat_number_decreased(
+        #[case] measure_str: &str,
+        #[case] error: &str,
+    ) {
+        assert_eq!(
+            parse_measure(measure_str, STANDARD_SAMPLE_NAMES),
+            Err(MeasureParseError::LogicalError(error.into())),
+        );
+    }
+
+    #[rstest]
+    #[case::no_beats(
+        "",
+        "
+1 | 
+  | ^---
+  |
+  = expected placement (e.g. `1`, `and`, `1/3`)"
+    )]
+    #[case::no_samples(
+        "1:",
+        "
+1 | 1:
+  |   ^---
+"
+    )]
+    #[case::beat_1_space(
+        "1: click",
+        "
+1 | 1: click
+  |   ^---
+"
+    )]
+    #[case::beat_1_no_colon(
+        "1click",
+        "
+1 | 1click
+  | ^---
+  |
+  = expected beat (e.g. `1:kick,hat`)"
+    )]
+    #[case::bad_fraction(
+        "1:click 1/0:CLICK",
+        "
+1 | 1:click 1/0:CLICK
+  |         ^---
+"
+    )]
+    fn test_parse_measure_error_beat_syntax_errors(
+        #[case] measure_str: &str,
+        #[case] expected_error: &str,
+    ) {
+        let err = parse_measure(measure_str, STANDARD_SAMPLE_NAMES);
+        assert_matches!(err, Err(MeasureParseError::SyntaxError(_)),);
+
+        let syntax_error = err.err().unwrap().to_string();
+        assert!(syntax_error.contains(expected_error));
+    }
 }
