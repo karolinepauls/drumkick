@@ -1,6 +1,6 @@
+use pest::Parser as PestParser;
 use pest::error::Error as PestError;
 use pest::iterators::Pair;
-use pest::Parser as PestParser;
 use pest_derive::Parser as PestParser;
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -48,39 +48,39 @@ fn name_to_beat_fraction(name: &str) -> f64 {
 
 fn parse_measure_ast(measure_ast: Pair<Rule>) -> Result<Vec<BeatSpec>, String> {
     let mut beats = Vec::new();
+    let mut position_str = "1";
     let mut position = 1.0;
 
     for beat in measure_ast.into_inner() {
         match beat.as_rule() {
             Rule::beat => {
                 for beat in beat.into_inner() {
+                    let mut new_position_str = position_str;
                     let mut new_position = position;
+
                     match beat.as_rule() {
                         Rule::placement => {
                             let placement = beat.into_inner().next().expect("beat placement");
-                            match placement.as_rule() {
-                                Rule::beat_no => {
-                                    new_position = placement
-                                        .as_str()
-                                        .parse::<u64>()
-                                        .expect("beat placement must be numeric")
-                                        as f64;
-                                }
+
+                            new_position_str = placement.as_str();
+                            new_position = match placement.as_rule() {
+                                Rule::beat_no => new_position_str
+                                    .parse::<u64>()
+                                    .expect("beat placement must be numeric")
+                                    as f64,
                                 Rule::beat_fraction_name => {
-                                    new_position = position.floor()
-                                        + name_to_beat_fraction(placement.as_str());
+                                    position.floor() + name_to_beat_fraction(new_position_str)
                                 }
                                 Rule::beat_fraction => {
-                                    let fraction_str = placement.as_str();
                                     let (numerator_str, denominator_str) =
-                                        fraction_str.split_once('/').expect("fraction string");
+                                        new_position_str.split_once('/').expect("fraction string");
                                     let numerator: f64 =
                                         numerator_str.parse().expect("numerator f64");
                                     let denominator: f64 =
                                         denominator_str.parse().expect("denominator f64");
-                                    new_position = position.floor() + numerator / denominator;
+                                    position.floor() + numerator / denominator
                                 }
-                                _ => unreachable!("in beat placement {}", placement.as_str()),
+                                _ => unreachable!("in beat placement {}", new_position_str),
                             }
                         }
                         Rule::samples_list => {
@@ -102,14 +102,16 @@ fn parse_measure_ast(measure_ast: Pair<Rule>) -> Result<Vec<BeatSpec>, String> {
                                 beat.as_str()
                             )
                         }
-                    }
+                    };
                     if new_position < position {
                         return Err(format!(
                             "beat number decreased: {} → {}",
-                            position, new_position
+                            backtick_quote(position_str),
+                            backtick_quote(new_position_str)
                         ));
                     }
                     position = new_position;
+                    position_str = new_position_str;
                 }
             }
             Rule::EOI => (),
@@ -147,6 +149,7 @@ fn rename_rule(rule: &Rule, all_sample_names: &[&str]) -> String {
                 join_backtick_quoted(BEAT_FRACTIONS.iter().map(|(k, _)| k).cloned());
             format!("beat fraction name (one of: {})", all_fraction_names)
         }
+        Rule::non_zero_digit => "non-zero digit".to_string(),
         Rule::beat_fraction => "beat fraction (e.g. `1/3`)".to_string(),
         Rule::placement => "placement (e.g. `1`, `and`, `1/3`)".to_string(),
         Rule::beat => "beat (e.g. `1:kick,hat`)".to_string(),
@@ -387,12 +390,9 @@ mod test {
     }
 
     #[rstest]
-    #[case("1:click 2:click 1:click", "beat number decreased: 2 → 1")]
-    #[case("1:click and:click e:click", "beat number decreased: 1.5 → 1.25")]
-    #[case(
-        "1:click 2/3:click 1/3:click ",
-        "beat number decreased: 1.6666666666666665 → 1.3333333333333333"
-    )]
+    #[case("1:click 2:click 1:click", "beat number decreased: `2` → `1`")]
+    #[case("1:click and:click e:click", "beat number decreased: `and` → `e`")]
+    #[case("1:click 2/3:click 1/3:click ", "beat number decreased: `2/3` → `1/3`")]
     fn test_parse_measure_error_beat_number_decreased(
         #[case] measure_str: &str,
         #[case] error: &str,
@@ -434,10 +434,24 @@ mod test {
   |
   = expected beat (e.g. `1:kick,hat`)"
     )]
-    #[case::bad_fraction(
+    #[case::bad_fraction_1_over_0(
         "1:click 1/0:CLICK",
         "
 1 | 1:click 1/0:CLICK
+  |           ^---
+"
+    )]
+    #[case::bad_fraction_0_over_0(
+        "1:click 0/0:CLICK",
+        "
+1 | 1:click 0/0:CLICK
+  |         ^---
+"
+    )]
+    #[case::bad_fraction_0_over_0(
+        "1:click 0/0:CLICK",
+        "
+1 | 1:click 0/0:CLICK
   |         ^---
 "
     )]
@@ -446,7 +460,7 @@ mod test {
         #[case] expected_error: &str,
     ) {
         let err = parse_measure(measure_str, STANDARD_SAMPLE_NAMES);
-        assert_matches!(err, Err(MeasureParseError::SyntaxError(_)),);
+        assert_matches!(err, Err(MeasureParseError::SyntaxError(_)));
 
         let syntax_error = err.err().unwrap().to_string();
         assert!(syntax_error.contains(expected_error));

@@ -5,7 +5,8 @@ beat_no            = {
     ASCII_NONZERO_DIGIT ~ ASCII_DIGIT*
 }
 beat_fraction_name = { "e" | "&" | "and" | "ah" | "uh" | "a" | "trip" | "tri" | "let" | "plet" }
-beat_fraction      = { ASCII_NONZERO_DIGIT ~ "/" ~ ASCII_NONZERO_DIGIT }
+non_zero_digit     = { ASCII_NONZERO_DIGIT }
+beat_fraction      = { non_zero_digit ~ "/" ~ non_zero_digit }
 placement          = { beat_fraction | beat_fraction_name | beat_no }
 beat               = { (placement ~ ":") ~ samples_list }
 measure            = { SOI ~ " "* ~ beat ~ (" "+ ~ beat)* ~ " "* ~ EOI }
