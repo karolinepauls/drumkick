@@ -48,3 +48,5 @@ Patterns
 - **4/4 quarter note triplets**: ``'1:DRIP trip:click let:click 2:CLICK trip:click let:click 3:CLICK trip:click let:click 4:CLICK trip:click let:click'``
 
 - **quintuplets**: ``'1:CLICK 1/5:click 2/5:click 3/5:click 4/5:click'``
+
+- **4/4 internal clock practice pattern (half bar filled, half empty)**: ``'1:CLICK and:click 2:CLICK and:click 3: 4:'``

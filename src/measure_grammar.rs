@@ -1,6 +1,6 @@
-use pest::Parser as PestParser;
 use pest::error::Error as PestError;
 use pest::iterators::Pair;
+use pest::Parser as PestParser;
 use pest_derive::Parser as PestParser;
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -51,16 +51,19 @@ fn parse_measure_ast(measure_ast: Pair<Rule>) -> Result<Vec<BeatSpec>, String> {
     let mut position_str = "1";
     let mut position = 1.0;
 
-    for beat in measure_ast.into_inner() {
-        match beat.as_rule() {
+    for measure_component in measure_ast.into_inner() {
+        match measure_component.as_rule() {
             Rule::beat => {
-                for beat in beat.into_inner() {
+                let mut samples = Vec::new();
+
+                for beat_component in measure_component.into_inner() {
                     let mut new_position_str = position_str;
                     let mut new_position = position;
 
-                    match beat.as_rule() {
+                    match beat_component.as_rule() {
                         Rule::placement => {
-                            let placement = beat.into_inner().next().expect("beat placement");
+                            let placement =
+                                beat_component.into_inner().next().expect("beat placement");
 
                             new_position_str = placement.as_str();
                             new_position = match placement.as_rule() {
@@ -84,25 +87,22 @@ fn parse_measure_ast(measure_ast: Pair<Rule>) -> Result<Vec<BeatSpec>, String> {
                             }
                         }
                         Rule::samples_list => {
-                            let samples = beat
-                                .into_inner()
-                                .map(|sample| sample.as_str().to_owned())
-                                .collect();
-
-                            beats.push(BeatSpec {
-                                samples,
-                                time: position,
-                            });
+                            samples.extend(
+                                beat_component
+                                    .into_inner()
+                                    .map(|sample| sample.as_str().to_owned()),
+                            );
                         }
                         Rule::EOI => (),
                         other_rule => {
                             unreachable!(
                                 "rule {:?} in beat component {}",
                                 other_rule,
-                                beat.as_str()
+                                beat_component.as_str()
                             )
                         }
                     };
+
                     if new_position < position {
                         return Err(format!(
                             "beat number decreased: {} → {}",
@@ -110,16 +110,22 @@ fn parse_measure_ast(measure_ast: Pair<Rule>) -> Result<Vec<BeatSpec>, String> {
                             backtick_quote(new_position_str)
                         ));
                     }
+
                     position = new_position;
                     position_str = new_position_str;
                 }
+
+                beats.push(BeatSpec {
+                    samples,
+                    time: position,
+                });
             }
             Rule::EOI => (),
             other_rule => {
                 unreachable!(
                     "rule {:?} in measure component {}",
                     other_rule,
-                    beat.as_str()
+                    measure_component.as_str()
                 )
             }
         }
@@ -212,6 +218,48 @@ mod test {
                 },
                 BeatSpec {
                     samples: vec!["click".to_string()],
+                    time: 2.0,
+                },
+                BeatSpec {
+                    samples: vec!["click".to_string()],
+                    time: 3.0,
+                },
+            ]
+        );
+    }
+
+    #[rstest]
+    fn test_parse_measure_beats_without_samples_at_beginning_and_end() {
+        assert_eq!(
+            parse_measure("1: 2:click 3:", STANDARD_SAMPLE_NAMES).unwrap(),
+            [
+                BeatSpec {
+                    samples: vec![],
+                    time: 1.0,
+                },
+                BeatSpec {
+                    samples: vec!["click".to_string()],
+                    time: 2.0,
+                },
+                BeatSpec {
+                    samples: vec![],
+                    time: 3.0,
+                },
+            ]
+        );
+    }
+
+    #[rstest]
+    fn test_parse_measure_beats_without_samples_in_between_other_beats() {
+        assert_eq!(
+            parse_measure("1:CLICK 2: 3:click", STANDARD_SAMPLE_NAMES).unwrap(),
+            [
+                BeatSpec {
+                    samples: vec!["CLICK".to_string()],
+                    time: 1.0,
+                },
+                BeatSpec {
+                    samples: vec![],
                     time: 2.0,
                 },
                 BeatSpec {
@@ -412,18 +460,11 @@ mod test {
   |
   = expected placement (e.g. `1`, `and`, `1/3`)"
     )]
-    #[case::no_samples(
-        "1:",
-        "
-1 | 1:
-  |   ^---
-"
-    )]
     #[case::beat_1_space(
         "1: click",
         "
 1 | 1: click
-  |   ^---
+  |    ^---
 "
     )]
     #[case::beat_1_no_colon(
@@ -463,6 +504,11 @@ mod test {
         assert_matches!(err, Err(MeasureParseError::SyntaxError(_)));
 
         let syntax_error = err.err().unwrap().to_string();
-        assert!(syntax_error.contains(expected_error));
+        assert!(
+            syntax_error.contains(expected_error),
+            "EXPECTED SUBSTRING:\n{}\nIN:\n{}",
+            expected_error,
+            syntax_error
+        );
     }
 }
