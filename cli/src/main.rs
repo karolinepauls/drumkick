@@ -1,6 +1,4 @@
-use clap::{Parser, builder::RangedU64ValueParser, value_parser};
-use kira::{sound::FromFileError, sound::static_sound::StaticSoundData};
-use pest::set_error_detail;
+use clap::{builder::RangedU64ValueParser, value_parser, Parser};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io::{self, Read};
@@ -8,12 +6,11 @@ use std::{thread, time};
 use thiserror::Error;
 
 use drumkick::{
-    Beat, DrumkickBackend, DrumkickOpts, Message, Track,
-    embedded_samples::{EMBEDDED_SAMPLE_NAMES, get_embedded_sample, get_embedded_sample_names},
-    measure_grammar::{
-        BEAT_FRACTIONS, BeatSpec, MeasureParseError, backtick_quote, join_backtick_quoted,
-        parse_measure,
-    },
+    embedded_samples::{get_embedded_sample_names, EMBEDDED_SAMPLE_NAMES},
+    measure_grammar::{backtick_quote, parse_measure, BeatSpec, MeasureParseError, BEAT_FRACTIONS},
+    pest_set_error_detail,
+    samples::load_samples,
+    DrumkickBackend, DrumkickOpts, Message, Track,
 };
 
 const BUFFER_SIZE: u32 = 2048;
@@ -132,23 +129,6 @@ impl fmt::Display for ArgsParseError {
     }
 }
 
-#[derive(Error, Debug)]
-enum SampleLoadingError {
-    #[error("no such sample - available sample names are: {}", join_backtick_quoted(.0.iter().map(String::as_ref)))]
-    NoSuchSample(Vec<String>),
-    #[error("sample loading failed {0}")]
-    FromFile(FromFileError),
-}
-
-#[derive(Error, Debug)]
-#[error(
-    "error loading samples: {}",
-    .errors.iter().map(|(sample, err)| format!("{:?}: {}", sample, err)).collect::<Vec<_>>().join(", ")
-)]
-struct SampleLoadingErrors {
-    errors: Vec<(String, SampleLoadingError)>,
-}
-
 fn unwrap_or_terminate<T, E: fmt::Display>(r: Result<T, E>, error_code: i32) -> T {
     match r {
         Ok(s) => s,
@@ -161,12 +141,19 @@ fn unwrap_or_terminate<T, E: fmt::Display>(r: Result<T, E>, error_code: i32) -> 
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    set_error_detail(true);
+    pest_set_error_detail(true);
 
     let track_spec =
         unwrap_or_terminate(interpret_args(&args), ExitCodes::CantInterpretArgs.code());
 
-    let beats = unwrap_or_terminate(load_samples(&track_spec), ExitCodes::CantLoadSamples.code());
+    let beats = unwrap_or_terminate(
+        load_samples(
+            &track_spec.measure_beats,
+            &track_spec.ordered_samples,
+            &track_spec.sample_locations,
+        ),
+        ExitCodes::CantLoadSamples.code(),
+    );
 
     let beats_in_measure = beats[beats.len() - 1].time.floor() as u64;
     eprintln!("Measure has {beats_in_measure} beats");
@@ -279,67 +266,4 @@ fn interpret_args<'a>(args: &'a Args) -> Result<TrackSpec<'a>, Box<ArgsParseErro
             measure_parse_errors: measure_beats.err(),
         })),
     }
-}
-
-fn load_samples(track_spec: &TrackSpec) -> Result<Vec<Beat>, SampleLoadingErrors> {
-    let sample_names: HashSet<_> = track_spec
-        .measure_beats
-        .iter()
-        .flat_map(|bs| &bs.samples)
-        .map(|s| s.as_str())
-        .collect();
-    let mut name_to_sample: HashMap<&str, StaticSoundData> = HashMap::new();
-    let mut errors: Vec<(&str, SampleLoadingError)> = Vec::new();
-
-    for name in sample_names {
-        let sound_data = track_spec
-            .sample_locations
-            .get(name)
-            .map(StaticSoundData::from_file)
-            // Check for a sample embedded in the binary in case it isn't present in sample_locations.
-            .or_else(|| get_embedded_sample(name).map(StaticSoundData::from_cursor));
-
-        match sound_data {
-            Some(Ok(sound_data)) => {
-                eprintln!("Loaded sample {name} {}", sound_data.sample_rate);
-                name_to_sample.insert(name, sound_data);
-            }
-            Some(Err(err)) => {
-                errors.push((name, SampleLoadingError::FromFile(err)));
-            }
-            None => errors.push((
-                name,
-                SampleLoadingError::NoSuchSample(
-                    track_spec
-                        .ordered_samples
-                        .iter()
-                        .cloned()
-                        .map(String::from)
-                        .collect::<Vec<String>>(),
-                ),
-            )),
-        }
-    }
-
-    if !errors.is_empty() {
-        return Err(SampleLoadingErrors {
-            errors: errors
-                .into_iter()
-                .map(|(s, err)| (s.to_string(), err))
-                .collect(),
-        });
-    }
-
-    Ok(track_spec
-        .measure_beats
-        .iter()
-        .map(|bs| Beat {
-            time: bs.time,
-            samples: bs
-                .samples
-                .iter()
-                .map(|sample_name| name_to_sample.get(sample_name.as_str()).unwrap().clone())
-                .collect(),
-        })
-        .collect())
 }

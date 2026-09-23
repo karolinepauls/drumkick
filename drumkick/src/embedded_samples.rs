@@ -1,11 +1,17 @@
 /// Basic samples hardcoded in the binary.
 use std::io::Cursor;
 
+macro_rules! include_sample {
+    ($name:expr) => {
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/samples/", $name))
+    };
+}
+
 const EMBEDDED_SAMPLES: &[(&str, &[u8])] = &[
-    ("CLICK", include_bytes!("../samples/click_strong.mp3")),
-    ("click", include_bytes!("../samples/click_weak.mp3")),
-    ("DRIP", include_bytes!("../samples/drip_strong.mp3")),
-    ("drip", include_bytes!("../samples/drip_weak.mp3")),
+    ("CLICK", include_sample!("click_strong.mp3")),
+    ("click", include_sample!("click_weak.mp3")),
+    ("DRIP", include_sample!("drip_strong.mp3")),
+    ("drip", include_sample!("drip_weak.mp3")),
 ];
 
 pub const EMBEDDED_SAMPLE_NAMES: &[&str] = &{

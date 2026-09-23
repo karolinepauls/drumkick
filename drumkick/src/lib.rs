@@ -1,19 +1,22 @@
-use kira::backend::cpal::CpalBackendSettings;
 use kira::backend::cpal::cpal::{
-    BufferSize, default_host,
+    default_host,
     traits::{DeviceTrait, HostTrait},
+    BufferSize,
 };
+use kira::backend::cpal::CpalBackendSettings;
 use kira::{
-    AudioManager, AudioManagerSettings, DefaultBackend, Tween,
     clock::{ClockHandle, ClockSpeed, ClockTime},
     sound::static_sound::{StaticSoundData, StaticSoundSettings},
     track::MainTrackBuilder,
+    AudioManager, AudioManagerSettings, DefaultBackend, Tween,
 };
-use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+pub use pest::set_error_detail as pest_set_error_detail;
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::{thread, time};
 
 pub mod embedded_samples;
 pub mod measure_grammar;
+pub mod samples;
 
 const BUFFER_SIZE: u32 = 2048;
 const PRECISION: usize = 32;
