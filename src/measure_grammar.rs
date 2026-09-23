@@ -1,6 +1,6 @@
+use pest::Parser as PestParser;
 use pest::error::Error as PestError;
 use pest::iterators::Pair;
-use pest::Parser as PestParser;
 use pest_derive::Parser as PestParser;
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -24,7 +24,7 @@ pub enum MeasureParseError {
     LogicalError(String),
 }
 
-pub(crate) static BEAT_FRACTIONS: &[(&str, f64)] = &[
+pub static BEAT_FRACTIONS: &[(&str, f64)] = &[
     ("e", 0.25),
     ("&", 0.5),
     ("and", 0.5),
@@ -134,11 +134,11 @@ fn parse_measure_ast(measure_ast: Pair<Rule>) -> Result<Vec<BeatSpec>, String> {
     Ok(beats)
 }
 
-pub(crate) fn backtick_quote(k: &str) -> String {
+pub fn backtick_quote(k: &str) -> String {
     format!("`{}`", k.replace("`", "\\`"))
 }
 
-pub(crate) fn join_backtick_quoted<'a>(items: impl Iterator<Item = &'a str>) -> String {
+pub fn join_backtick_quoted<'a>(items: impl Iterator<Item = &'a str>) -> String {
     items.map(backtick_quote).collect::<Vec<_>>().join(", ")
 }
 
@@ -164,7 +164,7 @@ fn rename_rule(rule: &Rule, all_sample_names: &[&str]) -> String {
     }
 }
 
-pub(crate) fn parse_measure(
+pub fn parse_measure(
     measure: &str,
     all_sample_names: &[&str],
 ) -> Result<Vec<BeatSpec>, MeasureParseError> {

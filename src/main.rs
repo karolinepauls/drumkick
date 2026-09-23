@@ -1,25 +1,23 @@
 use clap::{Parser, builder::RangedU64ValueParser, value_parser};
-use kira::backend::cpal::CpalBackendSettings;
-use kira::backend::cpal::cpal::{
-    BufferSize, default_host,
-    traits::{DeviceTrait, HostTrait},
-};
-use kira::{
-    AudioManager, AudioManagerSettings, DefaultBackend,
-    clock::{ClockSpeed, ClockTime},
-    sound::FromFileError,
-    sound::static_sound::{StaticSoundData, StaticSoundHandle, StaticSoundSettings},
-};
+use kira::{sound::FromFileError, sound::static_sound::StaticSoundData};
 use pest::set_error_detail;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::io::{self, Read};
 use std::{thread, time};
 use thiserror::Error;
 
-mod embedded_samples;
-use embedded_samples::{EMBEDDED_SAMPLE_NAMES, get_embedded_sample, get_embedded_sample_names};
-mod measure_grammar;
-use measure_grammar::*;
+use drumkick::{
+    Beat, DrumkickBackend, DrumkickOpts, Message, Track,
+    embedded_samples::{EMBEDDED_SAMPLE_NAMES, get_embedded_sample, get_embedded_sample_names},
+    measure_grammar::{
+        BEAT_FRACTIONS, BeatSpec, MeasureParseError, backtick_quote, join_backtick_quoted,
+        parse_measure,
+    },
+};
+
+const BUFFER_SIZE: u32 = 2048;
+const PRECISION: usize = 32;
 
 #[repr(i32)]
 #[derive(Copy, Clone, Debug)]
@@ -82,7 +80,7 @@ This will result in the `kick` sample being available in the `MEASURE` argument.
 
     #[arg(
         long,
-        default_value_t = 32,
+        default_value_t = PRECISION,
         value_parser = RangedU64ValueParser::<usize>::new().range(1..=1024),
         help = "Beat scheduling precision in audio wave samples (lower → better precision, more CPU).
 --precision=32 at 48kHz gives about 1.33ms jitter which should be acceptable in any application.
@@ -94,7 +92,7 @@ which can be configured by this argument."
 
     #[arg(
         long,
-        default_value_t = 2048,
+        default_value_t = BUFFER_SIZE,
         value_parser = value_parser!(u32).range(1..),
         help = "Audio host buffer size in audio wave samples (lower → better responsiveness, more CPU).
 This setting may be ignored by the system audio server. Extreme values, unless ignored, may result in the app
@@ -109,19 +107,6 @@ struct TrackSpec<'a> {
     measure_beats: Vec<BeatSpec>,
     ordered_samples: Vec<&'a str>,
     sample_locations: HashMap<&'a str, &'a str>,
-}
-
-#[derive(Debug)]
-struct Beat {
-    samples: Vec<StaticSoundData>,
-    time: f64,
-}
-
-#[derive(Debug)]
-struct Track {
-    beats_per_minute: f64,
-    beats_in_measure: u64,
-    measure_beats: Vec<Beat>,
 }
 
 #[derive(Error, Debug)]
@@ -164,13 +149,11 @@ struct SampleLoadingErrors {
     errors: Vec<(String, SampleLoadingError)>,
 }
 
-const MIN_MEASURES: u64 = 4;
-
 fn unwrap_or_terminate<T, E: fmt::Display>(r: Result<T, E>, error_code: i32) -> T {
     match r {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("{}", e);
+            eprintln!("{e}");
             std::process::exit(error_code);
         }
     }
@@ -186,70 +169,62 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let beats = unwrap_or_terminate(load_samples(&track_spec), ExitCodes::CantLoadSamples.code());
 
     let beats_in_measure = beats[beats.len() - 1].time.floor() as u64;
-    eprintln!("Measure has {} beats", beats_in_measure);
+    eprintln!("Measure has {beats_in_measure} beats");
     let track = Track {
         beats_per_minute: track_spec.beats_per_minute,
         beats_in_measure,
         measure_beats: beats,
     };
 
-    let host = default_host();
-    let device = host.default_output_device().unwrap();
-    let mut cpal_config = device.default_output_config()?.config();
-    cpal_config.buffer_size = BufferSize::Fixed(args.buffer_size);
-
-    let cpal_settings = CpalBackendSettings {
-        device: Some(device),
-        config: Some(cpal_config),
-    };
-    let settings = AudioManagerSettings {
-        backend_settings: cpal_settings,
-        internal_buffer_size: args.precision,
-        ..AudioManagerSettings::default()
-    };
-    let mut manager = AudioManager::<DefaultBackend>::new(settings)?;
-    let mut clock = manager.add_clock(ClockSpeed::TicksPerMinute(track.beats_per_minute))?;
-
-    let mut next_beat_at = clock.time();
-
-    let beats_per_second = track.beats_per_minute / 60.0;
-    let seconds_per_measure = track.beats_in_measure as f64 / beats_per_second;
-    let measures_ahead_float = (beats_per_second * 2.0).ceil();
-    assert!(
-        measures_ahead_float.is_finite(),
-        "Expeting measures ahead to be finite but it's {}",
-        measures_ahead_float
-    );
-    let measures_ahead = (measures_ahead_float as u64).max(MIN_MEASURES);
-    eprintln!("Maintaining measures ahead: {}", measures_ahead);
-
-    let (_, next_beat_at_) = schedule_beats(
-        &mut manager,
-        next_beat_at,
-        &track.measure_beats,
-        track.beats_in_measure,
-        measures_ahead,
+    let (sender, drumkick) = DrumkickBackend::new(
+        DrumkickOpts {
+            buffer_size: args.buffer_size,
+            precision: args.precision,
+            sound_capacity: 512,
+            message_buffer_size: 32,
+        },
+        track,
     )?;
-    next_beat_at = next_beat_at_;
 
-    clock.start();
-    eprintln!("Metronome started");
+    drumkick.play()?;
+    let mut playing = true;
+    let mut bpm = track_spec.beats_per_minute;
 
+    // poor and naive terminal reader, tmp.
+    let mut reader = io::stdin().lock();
     loop {
-        if clock.time() + measures_ahead / 2 > next_beat_at {
-            eprintln!("Scheduled {} measures", measures_ahead);
-
-            let (_, new_next_beat_at) = schedule_beats(
-                &mut manager,
-                next_beat_at,
-                &track.measure_beats,
-                track.beats_in_measure,
-                measures_ahead,
-            )?;
-            next_beat_at = new_next_beat_at;
+        let mut buf = [0u8; 1];
+        reader.read_exact(&mut buf)?;
+        let character = buf[0] as char;
+        match character {
+            ' ' => {
+                sender.send(if playing {
+                    Message::Pause
+                } else {
+                    Message::Play
+                })?;
+                playing = !playing;
+            }
+            'e' | 'q' => {
+                sender.send(Message::Stop)?;
+                thread::sleep(time::Duration::from_millis(200));
+                break;
+            }
+            '+' => {
+                bpm += 5.0;
+                sender.send(Message::SetBPM(bpm))?;
+            }
+            '-' => {
+                bpm -= 5.0;
+                sender.send(Message::SetBPM(bpm))?;
+            }
+            _ => {
+                eprintln!("input {buf:?}");
+            }
         }
-        thread::sleep(time::Duration::from_secs_f64(seconds_per_measure));
     }
+
+    Ok(())
 }
 
 /// Produce a map of sample names to sample paths
@@ -326,7 +301,7 @@ fn load_samples(track_spec: &TrackSpec) -> Result<Vec<Beat>, SampleLoadingErrors
 
         match sound_data {
             Some(Ok(sound_data)) => {
-                eprintln!("Loaded sample {} {}", name, sound_data.sample_rate);
+                eprintln!("Loaded sample {name} {}", sound_data.sample_rate);
                 name_to_sample.insert(name, sound_data);
             }
             Some(Err(err)) => {
@@ -367,34 +342,4 @@ fn load_samples(track_spec: &TrackSpec) -> Result<Vec<Beat>, SampleLoadingErrors
                 .collect(),
         })
         .collect())
-}
-
-fn schedule_beats(
-    manager: &mut AudioManager,
-    start_at: ClockTime,
-    beats: &[Beat],
-    beats_in_measure: u64,
-    measures: u64,
-) -> Result<(Vec<StaticSoundHandle>, ClockTime), Box<dyn std::error::Error>> {
-    let mut sounds = vec![];
-
-    for measure_no in 0..measures {
-        let measure_time = start_at + beats_in_measure * measure_no;
-
-        for beat in beats.iter() {
-            let beat_time = measure_time + beat.time;
-
-            for sample in &beat.samples {
-                sounds.push(
-                    manager.play(
-                        sample
-                            .clone()
-                            .with_settings(StaticSoundSettings::new().start_time(beat_time)),
-                    )?,
-                );
-            }
-        }
-    }
-
-    Ok((sounds, start_at + beats_in_measure * measures))
 }
