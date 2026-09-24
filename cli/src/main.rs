@@ -1,16 +1,17 @@
-use clap::{builder::RangedU64ValueParser, value_parser, Parser};
-use std::collections::{HashMap, HashSet};
+use clap::{Parser, builder::RangedU64ValueParser, value_parser};
+use indexmap::IndexMap;
+use std::collections::HashSet;
 use std::fmt;
 use std::io::{self, Read};
 use std::{thread, time};
 use thiserror::Error;
 
 use drumkick::{
-    embedded_samples::{get_embedded_sample_names, EMBEDDED_SAMPLE_NAMES},
-    measure_grammar::{backtick_quote, parse_measure, BeatSpec, MeasureParseError, BEAT_FRACTIONS},
+    DrumkickBackend, DrumkickOpts, Message, Track,
+    embedded_samples::{EMBEDDED_SAMPLE_NAMES, get_embedded_sample_names},
+    measure_grammar::{BEAT_FRACTIONS, BeatSpec, MeasureParseError, backtick_quote, parse_measure},
     pest_set_error_detail,
     samples::load_samples,
-    DrumkickBackend, DrumkickOpts, Message, Track,
 };
 
 const BUFFER_SIZE: u32 = 2048;
@@ -100,10 +101,9 @@ being given insufficient time to produce the audio wave, resulting in buffer und
 
 #[derive(Debug)]
 struct TrackSpec<'a> {
-    beats_per_minute: f64,
+    bpm: f64,
     measure_beats: Vec<BeatSpec>,
-    ordered_samples: Vec<&'a str>,
-    sample_locations: HashMap<&'a str, &'a str>,
+    sample_locations: IndexMap<&'a str, &'a str>,
 }
 
 #[derive(Error, Debug)]
@@ -147,21 +147,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         unwrap_or_terminate(interpret_args(&args), ExitCodes::CantInterpretArgs.code());
 
     let beats = unwrap_or_terminate(
-        load_samples(
-            &track_spec.measure_beats,
-            &track_spec.ordered_samples,
-            &track_spec.sample_locations,
-        ),
+        load_samples(&track_spec.measure_beats, &track_spec.sample_locations),
         ExitCodes::CantLoadSamples.code(),
     );
 
-    let beats_in_measure = beats[beats.len() - 1].time.floor() as u64;
-    eprintln!("Measure has {beats_in_measure} beats");
     let track = Track {
-        beats_per_minute: track_spec.beats_per_minute,
-        beats_in_measure,
+        bpm: track_spec.bpm,
         measure_beats: beats,
     };
+    eprintln!("Measure has {} beats", track.beats_in_measure());
 
     let (sender, drumkick) = DrumkickBackend::new(
         DrumkickOpts {
@@ -175,7 +169,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     drumkick.play()?;
     let mut playing = true;
-    let mut bpm = track_spec.beats_per_minute;
+    let mut bpm = track_spec.bpm;
 
     // poor and naive terminal reader, tmp.
     let mut reader = io::stdin().lock();
@@ -215,10 +209,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Produce a map of sample names to sample paths
-fn parse_sample_locations(samples: &[String]) -> Result<HashMap<&str, &str>, SampleLocationsError> {
+fn parse_sample_locations(
+    samples: &[String],
+) -> Result<IndexMap<&str, &str>, SampleLocationsError> {
     let split_opts = samples.iter().map(|s| s.split_once('='));
     let mut errors = Vec::new();
-    let mut split = HashMap::new();
+    let mut split = IndexMap::new();
     for (sample, split_opt) in samples.iter().zip(split_opts) {
         match split_opt {
             Some((sample, path)) => {
@@ -256,9 +252,8 @@ fn interpret_args<'a>(args: &'a Args) -> Result<TrackSpec<'a>, Box<ArgsParseErro
 
     match (sample_locations, measure_beats) {
         (Ok(sample_locations), Ok(measure_beats)) => Ok(TrackSpec {
-            beats_per_minute: args.bpm,
+            bpm: args.bpm,
             measure_beats,
-            ordered_samples: all_sample_names,
             sample_locations,
         }),
         (sample_locations, measure_beats) => Err(Box::new(ArgsParseError {

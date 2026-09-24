@@ -1,17 +1,16 @@
-use kira::backend::cpal::cpal::{
-    default_host,
-    traits::{DeviceTrait, HostTrait},
-    BufferSize,
-};
 use kira::backend::cpal::CpalBackendSettings;
+use kira::backend::cpal::cpal::{
+    BufferSize, default_host,
+    traits::{DeviceTrait, HostTrait},
+};
 use kira::{
+    AudioManager, AudioManagerSettings, DefaultBackend, Tween,
     clock::{ClockHandle, ClockSpeed, ClockTime},
     sound::static_sound::{StaticSoundData, StaticSoundSettings},
     track::MainTrackBuilder,
-    AudioManager, AudioManagerSettings, DefaultBackend, Tween,
 };
 pub use pest::set_error_detail as pest_set_error_detail;
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::{thread, time};
 
 pub mod embedded_samples;
@@ -56,9 +55,16 @@ pub struct Beat {
 
 #[derive(Debug)]
 pub struct Track {
-    pub beats_per_minute: f64,
-    pub beats_in_measure: u64,
+    pub bpm: f64,
     pub measure_beats: Vec<Beat>,
+}
+
+impl Track {
+    pub fn beats_in_measure(&self) -> u64 {
+        self.measure_beats[self.measure_beats.len() - 1]
+            .time
+            .floor() as u64
+    }
 }
 
 /// The metronome/drum machine
@@ -90,7 +96,7 @@ impl DrumkickBackend {
             ..AudioManagerSettings::default()
         };
         let mut manager = AudioManager::<DefaultBackend>::new(settings)?;
-        let clock = manager.add_clock(ClockSpeed::TicksPerMinute(track.beats_per_minute))?;
+        let clock = manager.add_clock(ClockSpeed::TicksPerMinute(track.bpm))?;
 
         let (sender, receiver) = sync_channel(opts.message_buffer_size);
 
@@ -113,13 +119,13 @@ impl DrumkickBackend {
             let mut clock_started = false;
 
             loop {
-                let measures_ahead = safe_measures_ahead(self.track.beats_per_minute);
+                let measures_ahead = safe_measures_ahead(self.track.bpm);
 
                 next_beat_at = schedule_beats(
                     &mut self.manager,
                     next_beat_at,
                     &self.track.measure_beats,
-                    self.track.beats_in_measure,
+                    self.track.beats_in_measure(),
                     measures_ahead,
                 )
                 .unwrap();
@@ -135,10 +141,11 @@ impl DrumkickBackend {
                 // (probably every 2048 audio wave samples), which makes it not very precise but the
                 // important feature is that the clock won't desync with audio device time.
                 loop {
-                    let single_beat_duration = beat_duration(self.track.beats_per_minute);
+                    let single_beat_duration = beat_duration(self.track.bpm);
 
                     let clock_time = self.clock.time();
-                    let sleep_target = next_beat_at - self.track.beats_in_measure / 2;
+                    let sleep_target = next_beat_at - self.track.beats_in_measure() / 2;
+
                     let sleep_time_in_beats = ((sleep_target.ticks as f64
                         - clock_time.ticks as f64)
                         + (sleep_target.fraction - clock_time.fraction))
@@ -170,9 +177,9 @@ impl DrumkickBackend {
                         }
                         Some(Message::SetBPM(bpm)) => {
                             eprintln!("BPM: {bpm}");
-                            self.track.beats_per_minute = bpm;
+                            self.track.bpm = bpm;
                             self.clock.set_speed(
-                                ClockSpeed::TicksPerMinute(self.track.beats_per_minute),
+                                ClockSpeed::TicksPerMinute(self.track.bpm),
                                 Tween {
                                     duration: time::Duration::from_millis(50),
                                     ..Default::default()

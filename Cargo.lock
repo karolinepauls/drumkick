@@ -194,6 +194,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "drumkick",
+ "indexmap",
  "thiserror 2.0.21",
 ]
 
@@ -299,6 +300,7 @@ dependencies = [
 name = "drumkick"
 version = "0.1.0"
 dependencies = [
+ "indexmap",
  "kira",
  "pest",
  "pest_derive",
