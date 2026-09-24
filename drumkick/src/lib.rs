@@ -112,11 +112,15 @@ impl DrumkickBackend {
     }
 
     // Consume self and start playback in a different thread, while receiving control messages.
+    //
+    // This is an awkward loop forced by Kira's limitations (no callbacks when a sound is played
+    // to let the app schedule new sounds). Future versions will likely use CPAL, maybe gutting
+    // Kira for its resampling code.
     pub fn play(mut self) -> Result<(), Box<dyn std::error::Error>> {
         thread::spawn(move || {
             let mut next_beat_at = self.clock.time();
             eprintln!("Metronome started");
-            let mut clock_started = false;
+            let mut clock_running = false;
 
             loop {
                 let measures_ahead = safe_measures_ahead(self.track.bpm);
@@ -131,9 +135,9 @@ impl DrumkickBackend {
                 .unwrap();
                 eprintln!("Scheduled {measures_ahead} measures");
 
-                if !clock_started {
+                if !clock_running {
                     self.clock.start();
-                    clock_started = true;
+                    clock_running = true;
                 }
 
                 // Sleep until the next/last measure is half-finished, basing on clock.time() instead of
@@ -146,10 +150,11 @@ impl DrumkickBackend {
                     let clock_time = self.clock.time();
                     let sleep_target = next_beat_at - self.track.beats_in_measure() / 2;
 
-                    let sleep_time_in_beats = ((sleep_target.ticks as f64
-                        - clock_time.ticks as f64)
-                        + (sleep_target.fraction - clock_time.fraction))
-                        .max(0.0);
+                    #[rustfmt::skip]
+                    let sleep_time_in_beats = (
+                        (sleep_target.ticks as f64 - clock_time.ticks as f64) +
+                        (sleep_target.fraction - clock_time.fraction)
+                    ).max(0.0);
 
                     let wait_duration = single_beat_duration * sleep_time_in_beats;
 
@@ -160,14 +165,20 @@ impl DrumkickBackend {
                         .ok();
                     match message {
                         None => {
-                            break;
+                            if clock_running {
+                                break;
+                            } else {
+                                continue;
+                            }
                         }
                         Some(Message::Play) => {
                             eprintln!("START");
+                            clock_running = true;
                             self.clock.start();
                         }
                         Some(Message::Pause) => {
                             eprintln!("PAUSE");
+                            clock_running = false;
                             self.clock.pause();
                         }
                         Some(Message::Stop) => {
