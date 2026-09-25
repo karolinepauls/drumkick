@@ -1,21 +1,41 @@
 use clap::{Parser, builder::RangedU64ValueParser, value_parser};
+use crossterm::event::{
+    self, Event,
+    KeyCode::{self, Char},
+    KeyEvent, KeyEventKind, KeyModifiers,
+};
 use indexmap::IndexMap;
+use ratatui_textarea::{CursorMove, Input, TextArea};
+use std::collections::VecDeque;
+
+use ratatui::{
+    DefaultTerminal, Frame,
+    layout::{Constraint, Direction, Layout},
+    style::{Color, Style, Stylize},
+    symbols::border,
+    text::{Line, Text},
+    widgets::{Block, Borders, Padding, Paragraph},
+};
 use std::collections::HashSet;
 use std::fmt;
-use std::io::{self, Read};
+use std::io::{self};
+use std::sync::mpsc::{Receiver, SyncSender};
 use std::{thread, time};
 use thiserror::Error;
 
 use drumkick::{
-    DrumkickBackend, DrumkickOpts, Message, Track,
+    BUFFER_SIZE, Command, DrumkickOpts, MAX_BPM, MIN_BPM, PRECISION, Response, ResponseLevel,
+    Track,
     embedded_samples::{EMBEDDED_SAMPLE_NAMES, get_embedded_sample_names},
     measure_grammar::{BEAT_FRACTIONS, BeatSpec, MeasureParseError, backtick_quote, parse_measure},
     pest_set_error_detail,
     samples::load_samples,
+    start_drumkick,
 };
 
-const BUFFER_SIZE: u32 = 2048;
-const PRECISION: usize = 32;
+const UI_POLL_DURATION: time::Duration = time::Duration::from_millis(100);
+const DEBUG_MESSAGES_CAPACITY: usize = 20;
+const CONTROL: KeyModifiers = KeyModifiers::CONTROL;
 
 #[repr(i32)]
 #[derive(Copy, Clone, Debug)]
@@ -139,7 +159,360 @@ fn unwrap_or_terminate<T, E: fmt::Display>(r: Result<T, E>, error_code: i32) -> 
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn get_input_text<'a>(input: &'a TextArea) -> &'a str {
+    input.lines().first().map(String::as_str).unwrap_or("")
+}
+
+/// Retain decimal characters and only the first dot
+fn retain_real_number_chars(input: &str) -> String {
+    let mut real_number_chars_only = String::with_capacity(input.len());
+
+    let mut dot_seen = false;
+    for ch in input.chars() {
+        if ch == '.' && !dot_seen {
+            real_number_chars_only.push(ch);
+            dot_seen = true;
+        } else if ch.is_ascii_digit() {
+            real_number_chars_only.push(ch);
+        }
+    }
+
+    real_number_chars_only
+}
+
+#[derive(Debug)]
+pub struct App<'textarea_block_why_is_it_even_here> {
+    cmd_sender: SyncSender<Command>,
+    resp_receiver: Receiver<Response>,
+    bpm: f64,
+    playing: bool,
+    exit: bool,
+    error: Option<String>,
+    user_message: Option<String>,
+    debug_messages: VecDeque<String>,
+    bpm_input: Option<TextArea<'textarea_block_why_is_it_even_here>>,
+}
+
+impl App<'_> {
+    pub fn new(opts: DrumkickOpts, track: Track) -> Result<Self, Box<dyn std::error::Error>> {
+        let bpm = track.bpm;
+        let (cmd_sender, resp_receiver) = start_drumkick(opts, track)?;
+        Ok(Self {
+            cmd_sender,
+            resp_receiver,
+            bpm,
+            playing: false,
+            exit: false,
+            error: None,
+            user_message: None,
+            debug_messages: VecDeque::new(),
+            bpm_input: None,
+        })
+    }
+
+    pub fn run(
+        &mut self,
+        terminal: &mut DefaultTerminal,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.cmd_sender.send(Command::Play)?;
+        self.playing = true;
+
+        while !self.exit {
+            terminal.draw(|frame| self.draw(frame))?;
+
+            let mut event_received = false;
+            while !event_received {
+                event_received = self.handle_events()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn draw(&self, frame: &mut Frame) {
+        let area = frame
+            .area()
+            .centered(Constraint::Max(80), Constraint::Max(30));
+        let outer_block = Block::new();
+        let outer_layout = Layout::default()
+            .margin(1)
+            .constraints(vec![Constraint::Min(1)])
+            .split(outer_block.inner(area));
+
+        // Main block
+        let title = Line::from(vec![
+            " drumkick".bold(),
+            " - ".into(),
+            self.user_message.as_deref().unwrap_or("").gray(),
+            " ".into(),
+        ]);
+
+        let instructions = Line::from(if self.bpm_input.is_some() {
+            vec![" Quit ".into(), "<^c> ".blue().bold()]
+        } else {
+            vec![
+                " Play/Pause: ".into(),
+                "<SPACE>".blue().bold(),
+                " Adjust BPM: ".into(),
+                "<+/-/Up/Down>".blue().bold(),
+                " Quit ".into(),
+                "<Q/^c> ".blue().bold(),
+            ]
+        });
+
+        let block = Block::bordered()
+            .padding(1.into())
+            .title(title.centered())
+            .title_bottom(instructions.centered())
+            .border_set(border::THICK);
+
+        let layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(vec![
+                Constraint::Max(4),
+                // setting BPM
+                Constraint::Fill(1),
+                // Debug output
+                Constraint::Fill(1),
+            ])
+            .split(block.inner(area));
+
+        let bpm_text = Text::from(vec![Line::from(vec![self.bpm.to_string().yellow()])]);
+
+        let debug_message_text: Text = Text::from_iter(
+            self.debug_messages
+                .iter()
+                .map(|m| Line::from(m.clone().dark_gray())),
+        );
+
+        frame.render_widget(outer_block, area);
+        frame.render_widget(block, outer_layout[0]);
+
+        let bpm_setting_layout = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(vec![
+                Constraint::Fill(1),
+                Constraint::Max(1),
+                Constraint::Fill(1),
+            ])
+            .split(layout[0]);
+
+        frame.render_widget(
+            Paragraph::new(Text::from(if self.bpm_input.is_some() {
+                "New BPM:"
+            } else {
+                "BPM:"
+            }))
+            .right_aligned()
+            .block(Block::new().padding(Padding::top(2))),
+            bpm_setting_layout[0],
+        );
+
+        if let Some(bpm_input) = self.bpm_input.as_ref() {
+            // BPM input
+            frame.render_widget(bpm_input, bpm_setting_layout[2]);
+        } else {
+            let bpm_paragraph =
+                Paragraph::new(bpm_text).block(Block::new().padding(Padding::top(2)).clone());
+
+            frame.render_widget(bpm_paragraph, bpm_setting_layout[2]);
+        }
+
+        // Status UI
+        let bpm_action = if self.bpm_input.is_some() {
+            "apply"
+        } else {
+            "input BPM"
+        };
+        let status_text = Text::from(vec![
+            Line::from(vec!["<ENTER>".bold(), " - ".into(), bpm_action.into()]),
+            Line::from(vec![]),
+            Line::from(vec![self.error.as_deref().unwrap_or("").red()]),
+        ]);
+
+        frame.render_widget(
+            Paragraph::new(status_text).centered().block(Block::new()),
+            layout[1],
+        );
+
+        // Debug UI
+        frame.render_widget(
+            Paragraph::new(debug_message_text).centered().block(
+                Block::new()
+                    .title(Line::from("Debug").centered())
+                    .borders(Borders::TOP)
+                    .border_set(border::PLAIN),
+            ),
+            layout[2],
+        );
+    }
+
+    fn handle_events(&mut self) -> io::Result<bool> {
+        let mut backend_resp_available = false;
+        for resp in self.resp_receiver.try_iter() {
+            backend_resp_available = true;
+            match resp {
+                Response {
+                    level: ResponseLevel::Debug,
+                    message,
+                } => {
+                    self.debug_messages.push_back(message);
+                    while self.debug_messages.len() > DEBUG_MESSAGES_CAPACITY {
+                        self.debug_messages.pop_front();
+                    }
+                }
+                Response {
+                    level: ResponseLevel::User,
+                    message,
+                } => {
+                    self.user_message = Some(message);
+                }
+            }
+        }
+
+        let terminal_event_available = event::poll(if backend_resp_available {
+            time::Duration::from_secs(0)
+        } else {
+            UI_POLL_DURATION
+        })?;
+        let input_registered = backend_resp_available | terminal_event_available;
+
+        if terminal_event_available {
+            let event = event::read()?;
+
+            // crossterm also emits key release and repeat events on Windows - skip other key
+            // events
+            if !matches!(
+                event,
+                Event::Key(KeyEvent {
+                    kind: KeyEventKind::Press,
+                    ..
+                })
+            ) {
+                return Ok(input_registered);
+            }
+
+            if let Event::Key(key_event) = event {
+                self.handle_global_key_event(key_event)
+            }
+
+            // Apply textarea input on enter
+            if let Some(bpm_input) = self.bpm_input.as_mut()
+                && matches!(
+                    event,
+                    Event::Key(KeyEvent {
+                        code: KeyCode::Enter,
+                        ..
+                    })
+                )
+            {
+                let text = get_input_text(bpm_input);
+                if let Ok(new_bpm) = text.parse::<f64>() {
+                    self.set_bpm(new_bpm);
+                } else {
+                    let error = format!(
+                        "BPM must be a decimal number (e.g. \"60\" or \"115.5\") - got {:?}",
+                        text
+                    );
+                    self.set_error(error)
+                }
+                self.bpm_input = None;
+            }
+            // Send input to the textarea if focused
+            else if let Some(bpm_input) = self.bpm_input.as_mut() {
+                let input: Input = event.clone().into();
+                bpm_input.input(input);
+
+                let text = get_input_text(bpm_input);
+                let rewritten_text = retain_real_number_chars(text);
+                bpm_input.clear();
+                bpm_input.insert_str(rewritten_text);
+            // Handle base-level UI events
+            } else if let Event::Key(key_event) = event {
+                self.handle_normal_key_event(key_event)
+            }
+        }
+
+        Ok(input_registered)
+    }
+
+    fn handle_global_key_event(&mut self, key_event: KeyEvent) {
+        if (key_event.code, key_event.modifiers) == (Char('c'), CONTROL) {
+            self.exit();
+        }
+    }
+
+    fn handle_normal_key_event(&mut self, key_event: KeyEvent) {
+        match (key_event.code, key_event.modifiers) {
+            (Char('q'), _) => self.exit(),
+            (Char(' '), _) => self.toggle_pause(),
+            (Char('+') | KeyCode::Up, _) => self.change_bpm(5.0),
+            (Char('-') | Char('_') | KeyCode::Down, _) => self.change_bpm(-5.0),
+            (KeyCode::Enter, _) => self.edit_bpm(),
+            _ => {}
+        };
+    }
+
+    fn set_error(&mut self, error: impl ToString) {
+        self.error = Some(error.to_string());
+    }
+
+    fn clear_error(&mut self) {
+        self.error = None;
+    }
+
+    fn exit(&mut self) {
+        if let Err(err) = self.cmd_sender.send(Command::Stop) {
+            self.set_error(err);
+        }
+
+        thread::sleep(time::Duration::from_millis(50));
+        self.exit = true;
+    }
+
+    fn toggle_pause(&mut self) {
+        let command = if self.playing {
+            Command::Pause
+        } else {
+            Command::Play
+        };
+
+        if let Err(err) = self.cmd_sender.send(command) {
+            self.set_error(err);
+        }
+
+        self.playing = !self.playing;
+    }
+
+    fn change_bpm(&mut self, diff: f64) {
+        self.set_bpm(self.bpm + diff)
+    }
+
+    fn set_bpm(&mut self, new_bpm: f64) {
+        let new_bpm = new_bpm.clamp(MIN_BPM, MAX_BPM);
+        self.bpm = new_bpm;
+        if let Err(err) = self.cmd_sender.send(Command::SetBPM(new_bpm)) {
+            self.set_error(err);
+        } else {
+            self.clear_error();
+        }
+    }
+
+    fn edit_bpm(&mut self) {
+        let mut textarea = TextArea::from([self.bpm.to_string()]);
+        textarea.move_cursor(CursorMove::End);
+
+        textarea.set_cursor_line_style(Style::default());
+        textarea.set_placeholder_text("Enter numeric BPM (eg. `80` or `75.5`)");
+        textarea.set_style(Style::default().fg(Color::DarkGray));
+        textarea.set_cursor_line_style(Style::default().fg(Color::Yellow));
+
+        textarea.set_block(Block::new().padding(Padding::top(2)));
+
+        self.bpm_input = Some(textarea);
+    }
+}
+
+fn init() -> Result<(DrumkickOpts, Track), Box<dyn std::error::Error>> {
     let args = Args::parse();
     pest_set_error_detail(true);
 
@@ -151,60 +524,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ExitCodes::CantLoadSamples.code(),
     );
 
-    let track = Track {
-        bpm: track_spec.bpm,
-        measure_beats: beats,
-    };
-    eprintln!("Measure has {} beats", track.beats_in_measure());
-
-    let (sender, drumkick) = DrumkickBackend::new(
+    Ok((
         DrumkickOpts {
             buffer_size: args.buffer_size,
             precision: args.precision,
             sound_capacity: 512,
             message_buffer_size: 32,
         },
-        track,
-    )?;
+        Track {
+            bpm: track_spec.bpm,
+            measure_beats: beats,
+        },
+    ))
+}
 
-    drumkick.play()?;
-    let mut playing = true;
-    let mut bpm = track_spec.bpm;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let (opts, track) = init()?;
+    eprintln!("Measure has {} beats", track.beats_in_measure());
 
-    // poor and naive terminal reader, tmp.
-    let mut reader = io::stdin().lock();
-    loop {
-        let mut buf = [0u8; 1];
-        reader.read_exact(&mut buf)?;
-        let character = buf[0] as char;
-        match character {
-            ' ' => {
-                sender.send(if playing {
-                    Message::Pause
-                } else {
-                    Message::Play
-                })?;
-                playing = !playing;
-            }
-            'e' | 'q' => {
-                sender.send(Message::Stop)?;
-                thread::sleep(time::Duration::from_millis(200));
-                break;
-            }
-            '+' => {
-                bpm += 5.0;
-                sender.send(Message::SetBPM(bpm))?;
-            }
-            '-' => {
-                bpm -= 5.0;
-                sender.send(Message::SetBPM(bpm))?;
-            }
-            _ => {
-                eprintln!("input {buf:?}");
-            }
-        }
-    }
-
+    let mut app = App::new(opts, track)?;
+    ratatui::run(|terminal| app.run(terminal))?;
     Ok(())
 }
 
@@ -260,5 +599,34 @@ fn interpret_args<'a>(args: &'a Args) -> Result<TrackSpec<'a>, Box<ArgsParseErro
             sample_locations: sample_locations.err(),
             measure_parse_errors: measure_beats.err(),
         })),
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use rstest::*;
+
+    #[rstest]
+    #[case("", "")]
+    #[case("12345677890", "12345677890")]
+    #[case("1234567789012345677890", "1234567789012345677890")]
+    #[case("1231.1", "1231.1")]
+    #[case(".9", ".9")]
+    #[case("1231..1", "1231.1")]
+    #[case("1231.1.", "1231.1")]
+    #[case(".1", ".1")]
+    #[case("..1", ".1")]
+    #[case("asd", "")]
+    #[case("asdąæπ²", "")]
+    #[case("12asdąæπ²", "12")]
+    #[case("1.2asdąæπ²", "1.2")]
+    #[case("asdąæπ²12", "12")]
+    #[case("asdąæπ²1.2", "1.2")]
+    #[case("asd12ąæπ²", "12")]
+    #[case("asd1.2ąæπ²", "1.2")]
+    #[case(".", ".")]
+    fn test_retain_real_number_chars(#[case] input: &str, #[case] retained: &str) {
+        assert_eq!(retain_real_number_chars(input), retained,);
     }
 }

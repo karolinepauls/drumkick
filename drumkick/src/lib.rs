@@ -10,6 +10,7 @@ use kira::{
     track::MainTrackBuilder,
 };
 pub use pest::set_error_detail as pest_set_error_detail;
+use std::fmt;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::{thread, time};
 
@@ -17,9 +18,11 @@ pub mod embedded_samples;
 pub mod measure_grammar;
 pub mod samples;
 
-const BUFFER_SIZE: u32 = 2048;
-const PRECISION: usize = 32;
-const MIN_MEASURES: u64 = 4;
+pub const BUFFER_SIZE: u32 = 2048;
+pub const PRECISION: usize = 32;
+pub const MIN_BPM: f64 = 1.0;
+pub const MAX_BPM: f64 = 400.0;
+const MIN_MEASURES: u64 = 2;
 
 pub struct DrumkickOpts {
     pub buffer_size: u32,
@@ -40,11 +43,21 @@ impl Default for DrumkickOpts {
 }
 
 #[derive(Debug)]
-pub enum Message {
+pub enum Command {
     Play,
     Pause,
     Stop,
     SetBPM(f64),
+}
+
+pub enum ResponseLevel {
+    Debug,
+    User,
+}
+
+pub struct Response {
+    pub level: ResponseLevel,
+    pub message: String,
 }
 
 #[derive(Debug)]
@@ -69,7 +82,8 @@ impl Track {
 
 /// The metronome/drum machine
 pub struct DrumkickBackend {
-    receiver: Receiver<Message>,
+    cmd_receiver: Receiver<Command>,
+    resp_sender: SyncSender<Response>,
     manager: AudioManager,
     clock: ClockHandle,
     track: Track,
@@ -77,9 +91,11 @@ pub struct DrumkickBackend {
 
 impl DrumkickBackend {
     pub fn new(
+        cmd_receiver: Receiver<Command>,
+        resp_sender: SyncSender<Response>,
         opts: DrumkickOpts,
         track: Track,
-    ) -> Result<(SyncSender<Message>, Self), Box<dyn std::error::Error>> {
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let host = default_host();
         let device = host.default_output_device().unwrap();
         let mut cpal_config = device.default_output_config()?.config();
@@ -98,110 +114,126 @@ impl DrumkickBackend {
         let mut manager = AudioManager::<DefaultBackend>::new(settings)?;
         let clock = manager.add_clock(ClockSpeed::TicksPerMinute(track.bpm))?;
 
-        let (sender, receiver) = sync_channel(opts.message_buffer_size);
-
-        Ok((
-            sender,
-            DrumkickBackend {
-                receiver,
-                manager,
-                clock,
-                track,
-            },
-        ))
+        Ok(DrumkickBackend {
+            cmd_receiver,
+            resp_sender,
+            manager,
+            clock,
+            track,
+        })
     }
 
     // Consume self and start playback in a different thread, while receiving control messages.
     //
+    // Initially playback will be paused.
+    //
     // This is an awkward loop forced by Kira's limitations (no callbacks when a sound is played
     // to let the app schedule new sounds). Future versions will likely use CPAL, maybe gutting
     // Kira for its resampling code.
-    pub fn play(mut self) -> Result<(), Box<dyn std::error::Error>> {
-        thread::spawn(move || {
-            let mut next_beat_at = self.clock.time();
-            eprintln!("Metronome started");
-            let mut clock_running = false;
+    pub fn run(mut self) {
+        let mut next_beat_at = self.clock.time();
+        self.resp_user("Metronome started");
+        let mut clock_running = false;
 
+        loop {
+            let measures_ahead = safe_measures_ahead(self.track.bpm);
+
+            next_beat_at = schedule_beats(
+                &mut self.manager,
+                next_beat_at,
+                &self.track.measure_beats,
+                self.track.beats_in_measure(),
+                measures_ahead,
+            )
+            .unwrap();
+            self.resp_debug(format!("Scheduled {measures_ahead} measures"));
+
+            // Sleep until the next/last measure is half-finished, basing on clock.time() instead of
+            // system time. The clock actually gets updated every time the audio thread gets a callback
+            // (probably every 2048 audio wave samples), which makes it not very precise but the
+            // important feature is that the clock won't desync with audio device time.
             loop {
-                let measures_ahead = safe_measures_ahead(self.track.bpm);
+                let single_beat_duration = beat_duration(self.track.bpm);
 
-                next_beat_at = schedule_beats(
-                    &mut self.manager,
-                    next_beat_at,
-                    &self.track.measure_beats,
-                    self.track.beats_in_measure(),
-                    measures_ahead,
-                )
-                .unwrap();
-                eprintln!("Scheduled {measures_ahead} measures");
+                let clock_time = self.clock.time();
+                let sleep_target = next_beat_at - self.track.beats_in_measure() / 2;
 
-                if !clock_running {
-                    self.clock.start();
-                    clock_running = true;
-                }
-
-                // Sleep until the next/last measure is half-finished, basing on clock.time() instead of
-                // system time. The clock actually gets updated every time the audio thread gets a callback
-                // (probably every 2048 audio wave samples), which makes it not very precise but the
-                // important feature is that the clock won't desync with audio device time.
-                loop {
-                    let single_beat_duration = beat_duration(self.track.bpm);
-
-                    let clock_time = self.clock.time();
-                    let sleep_target = next_beat_at - self.track.beats_in_measure() / 2;
-
-                    #[rustfmt::skip]
+                #[rustfmt::skip]
                     let sleep_time_in_beats = (
                         (sleep_target.ticks as f64 - clock_time.ticks as f64) +
                         (sleep_target.fraction - clock_time.fraction)
                     ).max(0.0);
 
-                    let wait_duration = single_beat_duration * sleep_time_in_beats;
+                let wait_duration = single_beat_duration * sleep_time_in_beats;
 
-                    eprintln!("receiving for {}", wait_duration);
-                    let message = self
-                        .receiver
-                        .recv_timeout(time::Duration::from_secs_f64(wait_duration))
-                        .ok();
-                    match message {
-                        None => {
-                            if clock_running {
-                                break;
-                            } else {
-                                continue;
-                            }
+                self.resp_debug(format!("receiving for {wait_duration}"));
+                eprintln!();
+                let command = self
+                    .cmd_receiver
+                    .recv_timeout(time::Duration::from_secs_f64(wait_duration))
+                    .ok();
+                String::new().to_string();
+                match command {
+                    None => {
+                        if clock_running {
+                            break;
+                        } else {
+                            continue;
                         }
-                        Some(Message::Play) => {
-                            eprintln!("START");
-                            clock_running = true;
-                            self.clock.start();
-                        }
-                        Some(Message::Pause) => {
-                            eprintln!("PAUSE");
-                            clock_running = false;
-                            self.clock.pause();
-                        }
-                        Some(Message::Stop) => {
-                            eprintln!("STOP");
-                            self.clock.stop();
-                            return;
-                        }
-                        Some(Message::SetBPM(bpm)) => {
-                            eprintln!("BPM: {bpm}");
-                            self.track.bpm = bpm;
-                            self.clock.set_speed(
-                                ClockSpeed::TicksPerMinute(self.track.bpm),
-                                Tween {
-                                    duration: time::Duration::from_millis(50),
-                                    ..Default::default()
-                                },
-                            );
-                        }
+                    }
+                    Some(Command::Play) => {
+                        self.resp_user("Playing");
+                        clock_running = true;
+                        self.clock.start();
+                    }
+                    Some(Command::Pause) => {
+                        self.resp_user("Paused");
+                        clock_running = false;
+                        self.clock.pause();
+                    }
+                    Some(Command::Stop) => {
+                        self.resp_user("Stopped");
+                        self.clock.stop();
+                        return;
+                    }
+                    Some(Command::SetBPM(bpm)) => {
+                        let bpm = bpm.clamp(MIN_BPM, MAX_BPM);
+
+                        self.resp_user(format!("BPM set to {bpm}"));
+                        self.track.bpm = bpm;
+                        self.clock.set_speed(
+                            ClockSpeed::TicksPerMinute(self.track.bpm),
+                            Tween {
+                                duration: time::Duration::from_millis(50),
+                                ..Default::default()
+                            },
+                        );
                     }
                 }
             }
-        });
-        Ok(())
+        }
+    }
+
+    fn send_response(&mut self, level: ResponseLevel, message: impl Into<String>) {
+        if let Err(err) = self.resp_sender.send(Response {
+            level,
+            message: message.into(),
+        }) {
+            eprintln!("Error sending response: {err}");
+        }
+    }
+
+    fn resp_debug(&mut self, message: impl Into<String>) {
+        self.send_response(ResponseLevel::Debug, message);
+    }
+    fn resp_user(&mut self, message: impl Into<String>) {
+        self.send_response(ResponseLevel::User, message);
+    }
+}
+
+impl fmt::Debug for DrumkickBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DrumkickBackend").finish_non_exhaustive()
     }
 }
 
@@ -252,4 +284,18 @@ fn schedule_beats(
 
     let next_beat_at = start_at + beats_in_measure * measures;
     Ok(next_beat_at)
+}
+
+pub fn start_drumkick(
+    opts: DrumkickOpts,
+    track: Track,
+) -> Result<(SyncSender<Command>, Receiver<Response>), Box<dyn std::error::Error>> {
+    let (cmd_sender, cmd_receiver) = sync_channel(opts.message_buffer_size);
+    let (resp_sender, resp_receiver) = sync_channel(opts.message_buffer_size);
+
+    let backend = DrumkickBackend::new(cmd_receiver, resp_sender, opts, track)?;
+
+    thread::spawn(move || backend.run());
+
+    Ok((cmd_sender, resp_receiver))
 }
