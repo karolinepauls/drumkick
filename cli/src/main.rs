@@ -10,11 +10,12 @@ use std::collections::VecDeque;
 
 use ratatui::{
     DefaultTerminal, Frame,
-    layout::{Constraint, Direction, Layout},
+    buffer::Buffer,
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style, Stylize},
     symbols::border,
     text::{Line, Text},
-    widgets::{Block, Borders, Padding, Paragraph},
+    widgets::{Block, Borders, Padding, Paragraph, Widget},
 };
 use std::collections::HashSet;
 use std::fmt;
@@ -181,6 +182,98 @@ fn retain_real_number_chars(input: &str) -> String {
 }
 
 #[derive(Debug)]
+enum BPMInputEditEffect {
+    Editing,
+    Applied(f64),
+    Error(String),
+}
+
+#[derive(Debug)]
+pub struct BPMInput<'certainly_something> {
+    input: TextArea<'certainly_something>,
+}
+impl BPMInput<'_> {
+    fn cursor_line_style() -> Style {
+        Style::default().fg(Color::Yellow)
+    }
+    fn cursor_style() -> Style {
+        Style::default().bg(Color::DarkGray)
+    }
+    fn hidden_cursor_style() -> Style {
+        // Setting the same style as cursor line hides a cursor.
+        Self::cursor_line_style()
+    }
+
+    fn new(initial_bpm: f64) -> Self {
+        let mut textarea = TextArea::from([initial_bpm.to_string()]);
+        textarea.move_cursor(CursorMove::End);
+
+        textarea.set_placeholder_text("Enter numeric BPM (eg. `80` or `75.5`)");
+
+        textarea.set_cursor_line_style(Self::cursor_line_style());
+        textarea.set_cursor_style(Self::hidden_cursor_style());
+
+        textarea.set_block(Block::new().padding(Padding::top(2)));
+
+        Self { input: textarea }
+    }
+
+    fn set_content(&mut self, content: &str) {
+        self.input.clear();
+        self.input.insert_str(content);
+    }
+
+    fn handle_event(&mut self, event: Event) -> BPMInputEditEffect {
+        // Handle enter pressed
+        if matches!(
+            event,
+            Event::Key(KeyEvent {
+                code: KeyCode::Enter,
+                ..
+            })
+        ) {
+            let text = get_input_text(&self.input);
+            if let Ok(new_bpm) = text.parse::<f64>() {
+                let new_bpm = new_bpm.clamp(MIN_BPM, MAX_BPM);
+                self.set_content(&new_bpm.to_string());
+                return BPMInputEditEffect::Applied(new_bpm);
+            } else {
+                return BPMInputEditEffect::Error(format!(
+                    "BPM must be a decimal number (e.g. \"60\" or \"115.5\") - got {:?}",
+                    text
+                ));
+            }
+        }
+
+        // Handle key input
+        let input: Input = event.clone().into();
+        self.input.input(input);
+
+        let text = get_input_text(&self.input);
+        let rewritten_text = retain_real_number_chars(text);
+        self.set_content(&rewritten_text);
+
+        BPMInputEditEffect::Editing
+    }
+
+    /// Change appearance based on focus.
+    ///
+    /// No effect on input handling.
+    fn set_focused(&mut self, focused: bool) {
+        match focused {
+            true => self.input.set_cursor_style(Self::cursor_style()),
+            false => self.input.set_cursor_style(Self::hidden_cursor_style()),
+        }
+    }
+}
+
+impl<'a> Widget for &BPMInput<'a> {
+    fn render(self, rect: Rect, buffer: &mut Buffer) {
+        self.input.render(rect, buffer);
+    }
+}
+
+#[derive(Debug)]
 pub struct App<'textarea_block_why_is_it_even_here> {
     cmd_sender: SyncSender<Command>,
     resp_receiver: Receiver<Response>,
@@ -190,7 +283,8 @@ pub struct App<'textarea_block_why_is_it_even_here> {
     error: Option<String>,
     user_message: Option<String>,
     debug_messages: VecDeque<String>,
-    bpm_input: Option<TextArea<'textarea_block_why_is_it_even_here>>,
+    bpm_input: BPMInput<'textarea_block_why_is_it_even_here>,
+    bpm_input_focused: bool,
 }
 
 impl App<'_> {
@@ -206,7 +300,8 @@ impl App<'_> {
             error: None,
             user_message: None,
             debug_messages: VecDeque::new(),
-            bpm_input: None,
+            bpm_input: BPMInput::new(bpm),
+            bpm_input_focused: false,
         })
     }
 
@@ -246,7 +341,7 @@ impl App<'_> {
             " ".into(),
         ]);
 
-        let instructions = Line::from(if self.bpm_input.is_some() {
+        let instructions = Line::from(if self.bpm_input_focused {
             vec![" Quit ".into(), "<^c> ".blue().bold()]
         } else {
             vec![
@@ -276,14 +371,6 @@ impl App<'_> {
             ])
             .split(block.inner(area));
 
-        let bpm_text = Text::from(vec![Line::from(vec![self.bpm.to_string().yellow()])]);
-
-        let debug_message_text: Text = Text::from_iter(
-            self.debug_messages
-                .iter()
-                .map(|m| Line::from(m.clone().dark_gray())),
-        );
-
         frame.render_widget(outer_block, area);
         frame.render_widget(block, outer_layout[0]);
 
@@ -296,8 +383,9 @@ impl App<'_> {
             ])
             .split(layout[0]);
 
+        // BPM input label
         frame.render_widget(
-            Paragraph::new(Text::from(if self.bpm_input.is_some() {
+            Paragraph::new(Text::from(if self.bpm_input_focused {
                 "New BPM:"
             } else {
                 "BPM:"
@@ -307,18 +395,11 @@ impl App<'_> {
             bpm_setting_layout[0],
         );
 
-        if let Some(bpm_input) = self.bpm_input.as_ref() {
-            // BPM input
-            frame.render_widget(bpm_input, bpm_setting_layout[2]);
-        } else {
-            let bpm_paragraph =
-                Paragraph::new(bpm_text).block(Block::new().padding(Padding::top(2)).clone());
-
-            frame.render_widget(bpm_paragraph, bpm_setting_layout[2]);
-        }
+        // BPM input
+        frame.render_widget(&self.bpm_input, bpm_setting_layout[2]);
 
         // Status UI
-        let bpm_action = if self.bpm_input.is_some() {
+        let bpm_action = if self.bpm_input_focused {
             "apply"
         } else {
             "input BPM"
@@ -328,13 +409,20 @@ impl App<'_> {
             Line::from(vec![]),
             Line::from(vec![self.error.as_deref().unwrap_or("").red()]),
         ]);
-
         frame.render_widget(
             Paragraph::new(status_text).centered().block(Block::new()),
             layout[1],
         );
 
         // Debug UI
+        let debug_rect = layout[2];
+        let lines_available = usize::from(debug_rect.height) - 2;
+        let debug_message_text = Text::from_iter(
+            self.debug_messages
+                .iter()
+                .skip(self.debug_messages.len().saturating_sub(lines_available))
+                .map(|m| Line::from(m.clone().dark_gray())),
+        );
         frame.render_widget(
             Paragraph::new(debug_message_text).centered().block(
                 Block::new()
@@ -342,7 +430,7 @@ impl App<'_> {
                     .borders(Borders::TOP)
                     .border_set(border::PLAIN),
             ),
-            layout[2],
+            debug_rect,
         );
     }
 
@@ -390,43 +478,17 @@ impl App<'_> {
             ) {
                 return Ok(input_registered);
             }
+            // Now we know key inputs are meaningful
 
             if let Event::Key(key_event) = event {
                 self.handle_global_key_event(key_event)
             }
 
             // Apply textarea input on enter
-            if let Some(bpm_input) = self.bpm_input.as_mut()
-                && matches!(
-                    event,
-                    Event::Key(KeyEvent {
-                        code: KeyCode::Enter,
-                        ..
-                    })
-                )
-            {
-                let text = get_input_text(bpm_input);
-                if let Ok(new_bpm) = text.parse::<f64>() {
-                    self.set_bpm(new_bpm);
-                } else {
-                    let error = format!(
-                        "BPM must be a decimal number (e.g. \"60\" or \"115.5\") - got {:?}",
-                        text
-                    );
-                    self.set_error(error)
-                }
-                self.bpm_input = None;
-            }
-            // Send input to the textarea if focused
-            else if let Some(bpm_input) = self.bpm_input.as_mut() {
-                let input: Input = event.clone().into();
-                bpm_input.input(input);
+            if self.bpm_input_focused {
+                self.handle_bpm_input_key_event(event);
 
-                let text = get_input_text(bpm_input);
-                let rewritten_text = retain_real_number_chars(text);
-                bpm_input.clear();
-                bpm_input.insert_str(rewritten_text);
-            // Handle base-level UI events
+                // Handle base-level UI events
             } else if let Event::Key(key_event) = event {
                 self.handle_normal_key_event(key_event)
             }
@@ -445,11 +507,25 @@ impl App<'_> {
         match (key_event.code, key_event.modifiers) {
             (Char('q'), _) => self.exit(),
             (Char(' '), _) => self.toggle_pause(),
-            (Char('+') | KeyCode::Up, _) => self.change_bpm(5.0),
+            (Char('+') | Char('=') | KeyCode::Up, _) => self.change_bpm(5.0),
             (Char('-') | Char('_') | KeyCode::Down, _) => self.change_bpm(-5.0),
-            (KeyCode::Enter, _) => self.edit_bpm(),
+            (KeyCode::Enter, _) => self.set_bpm_input_focused(true),
             _ => {}
         };
+    }
+
+    fn handle_bpm_input_key_event(&mut self, event: Event) {
+        let effect = self.bpm_input.handle_event(event);
+        match effect {
+            BPMInputEditEffect::Editing => {}
+            BPMInputEditEffect::Applied(bpm) => {
+                self.set_bpm(bpm);
+                self.set_bpm_input_focused(false)
+            }
+            BPMInputEditEffect::Error(err) => {
+                self.set_error(err);
+            }
+        }
     }
 
     fn set_error(&mut self, error: impl ToString) {
@@ -483,32 +559,22 @@ impl App<'_> {
         self.playing = !self.playing;
     }
 
+    fn set_bpm_input_focused(&mut self, focused: bool) {
+        self.bpm_input_focused = focused;
+        self.bpm_input.set_focused(focused);
+    }
+
     fn change_bpm(&mut self, diff: f64) {
         self.set_bpm(self.bpm + diff)
     }
 
     fn set_bpm(&mut self, new_bpm: f64) {
-        let new_bpm = new_bpm.clamp(MIN_BPM, MAX_BPM);
         self.bpm = new_bpm;
         if let Err(err) = self.cmd_sender.send(Command::SetBPM(new_bpm)) {
             self.set_error(err);
         } else {
             self.clear_error();
         }
-    }
-
-    fn edit_bpm(&mut self) {
-        let mut textarea = TextArea::from([self.bpm.to_string()]);
-        textarea.move_cursor(CursorMove::End);
-
-        textarea.set_cursor_line_style(Style::default());
-        textarea.set_placeholder_text("Enter numeric BPM (eg. `80` or `75.5`)");
-        textarea.set_style(Style::default().fg(Color::DarkGray));
-        textarea.set_cursor_line_style(Style::default().fg(Color::Yellow));
-
-        textarea.set_block(Block::new().padding(Padding::top(2)));
-
-        self.bpm_input = Some(textarea);
     }
 }
 
