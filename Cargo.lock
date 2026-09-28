@@ -566,9 +566,11 @@ dependencies = [
  "crossterm",
  "drumkick",
  "indexmap",
+ "libc",
  "ratatui",
  "ratatui-textarea",
  "rstest",
+ "termios",
  "thiserror 2.0.21",
 ]
 

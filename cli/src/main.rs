@@ -1,3 +1,6 @@
+mod cli;
+mod parsing;
+mod term;
 mod tui;
 use clap::{Parser, builder::RangedU64ValueParser, value_parser};
 use indexmap::IndexMap;
@@ -94,6 +97,9 @@ This setting may be ignored by the system audio server. Extreme values, unless i
 being given insufficient time to produce the audio wave, resulting in buffer underruns and clicks/pops/silence."
     )]
     buffer_size: u32,
+
+    #[arg(long, default_value_t = false, help = "Run without a TUI")]
+    headless: bool,
 }
 
 #[derive(Debug)]
@@ -136,7 +142,7 @@ fn unwrap_or_terminate<T, E: fmt::Display>(r: Result<T, E>, error_code: i32) -> 
     }
 }
 
-fn init() -> Result<(DrumkickOpts, Track), Box<dyn std::error::Error>> {
+fn init() -> Result<(Args, DrumkickOpts, Track), Box<dyn std::error::Error>> {
     let args = Args::parse();
     pest_set_error_detail(true);
 
@@ -148,27 +154,29 @@ fn init() -> Result<(DrumkickOpts, Track), Box<dyn std::error::Error>> {
         ExitCodes::CantLoadSamples.code(),
     );
 
-    Ok((
-        DrumkickOpts {
-            buffer_size: args.buffer_size,
-            precision: args.precision,
-            sound_capacity: 512,
-            message_buffer_size: 32,
-        },
-        Track {
-            bpm: track_spec.bpm,
-            measure_beats: beats,
-        },
-    ))
+    let opts = DrumkickOpts {
+        buffer_size: args.buffer_size,
+        precision: args.precision,
+        sound_capacity: 512,
+        message_buffer_size: 32,
+    };
+    let track = Track {
+        bpm: track_spec.bpm,
+        measure_beats: beats,
+    };
+
+    Ok((args, opts, track))
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (opts, track) = init()?;
+    let (args, opts, track) = init()?;
     eprintln!("Measure has {} beats", track.beats_in_measure());
 
-    let mut app = tui::App::new(opts, track)?;
-    ratatui::run(|terminal| app.run(terminal))?;
-    Ok(())
+    if args.headless {
+        cli::run_cli(opts, track)
+    } else {
+        tui::run_tui(opts, track)
+    }
 }
 
 /// Produce a map of sample names to sample paths

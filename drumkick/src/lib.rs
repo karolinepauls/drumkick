@@ -50,11 +50,13 @@ pub enum Command {
     SetBPM(f64),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ResponseLevel {
     Debug,
     User,
 }
 
+#[derive(Debug, Clone)]
 pub struct Response {
     pub level: ResponseLevel,
     pub message: String,
@@ -167,7 +169,6 @@ impl DrumkickBackend {
                 let wait_duration = single_beat_duration * sleep_time_in_beats;
 
                 self.resp_debug(format!("receiving for {wait_duration}"));
-                eprintln!();
                 let command = self
                     .cmd_receiver
                     .recv_timeout(time::Duration::from_secs_f64(wait_duration))

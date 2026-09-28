@@ -1,7 +1,9 @@
+use crate::parsing;
+use crate::term;
 use crossterm::event::{
-    self, Event,
+    Event,
     KeyCode::{self, Char},
-    KeyEvent, KeyEventKind, KeyModifiers,
+    KeyEvent, KeyModifiers,
 };
 use ratatui_textarea::{CursorMove, Input, TextArea};
 use std::collections::VecDeque;
@@ -19,13 +21,10 @@ use std::io::{self};
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::{thread, time};
 
-use drumkick::{
-    Command, DrumkickOpts, MAX_BPM, MIN_BPM, Response, ResponseLevel, Track, start_drumkick,
-};
+use drumkick::{Command, DrumkickOpts, Response, ResponseLevel, Track, start_drumkick};
 
 const UI_POLL_DURATION: time::Duration = time::Duration::from_millis(100);
 const DEBUG_MESSAGES_CAPACITY: usize = 20;
-const CONTROL: KeyModifiers = KeyModifiers::CONTROL;
 
 fn get_input_text<'a>(input: &'a TextArea) -> &'a str {
     input.lines().first().map(String::as_str).unwrap_or("")
@@ -100,8 +99,7 @@ impl BPMInput<'_> {
             })
         ) {
             let text = get_input_text(&self.input);
-            if let Ok(new_bpm) = text.parse::<f64>() {
-                let new_bpm = new_bpm.clamp(MIN_BPM, MAX_BPM);
+            if let Ok(new_bpm) = parsing::parse_bpm(text) {
                 self.set_content(&new_bpm.to_string());
                 return BPMInputEditEffect::Applied(new_bpm);
             } else {
@@ -216,8 +214,8 @@ impl App<'_> {
                 "<SPACE>".blue().bold(),
                 " Adjust BPM: ".into(),
                 "<+/-/Up/Down>".blue().bold(),
-                " Quit ".into(),
-                "<Q/^c> ".blue().bold(),
+                " Quit: ".into(),
+                "<Q/^C> ".blue().bold(),
             ]
         });
 
@@ -324,29 +322,14 @@ impl App<'_> {
             }
         }
 
-        let terminal_event_available = event::poll(if backend_resp_available {
+        let maybe_terminal_event = term::read_event_with_timeout(if backend_resp_available {
             time::Duration::from_secs(0)
         } else {
             UI_POLL_DURATION
         })?;
-        let input_registered = backend_resp_available | terminal_event_available;
+        let terminal_event_available = maybe_terminal_event.is_some();
 
-        if terminal_event_available {
-            let event = event::read()?;
-
-            // crossterm also emits key release and repeat events on Windows - skip other key
-            // events
-            if !matches!(
-                event,
-                Event::Key(KeyEvent {
-                    kind: KeyEventKind::Press,
-                    ..
-                })
-            ) {
-                return Ok(input_registered);
-            }
-            // Now we know key inputs are meaningful
-
+        if let Some(event) = maybe_terminal_event {
             if let Event::Key(key_event) = event {
                 self.handle_global_key_event(key_event)
             }
@@ -361,11 +344,11 @@ impl App<'_> {
             }
         }
 
-        Ok(input_registered)
+        Ok(backend_resp_available | terminal_event_available)
     }
 
     fn handle_global_key_event(&mut self, key_event: KeyEvent) {
-        if (key_event.code, key_event.modifiers) == (Char('c'), CONTROL) {
+        if (key_event.code, key_event.modifiers) == (Char('c'), KeyModifiers::CONTROL) {
             self.exit();
         }
     }
@@ -443,6 +426,11 @@ impl App<'_> {
             self.clear_error();
         }
     }
+}
+
+pub fn run_tui(opts: DrumkickOpts, track: Track) -> Result<(), Box<dyn std::error::Error>> {
+    let mut app = App::new(opts, track)?;
+    ratatui::run(|terminal| app.run(terminal))
 }
 
 #[cfg(test)]
