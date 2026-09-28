@@ -6,6 +6,7 @@ Practice metronome/drum machine for musicians and amateurs who want more than a 
 Features
 --------
 
+- TUI or headless mode (with ``--headless``). Both support pausing and BPM changes.
 - Samples included in the binary (``CLICK``, ``click``, ``DRIP``, ``drip``)
 - Sample loading from files
 - Any beat count supported
@@ -28,7 +29,7 @@ A pattern with samples.
 
 .. code:: sh
 
-    drumkick '1:kick,hat and:kick,hat 2:hat,snare and:hat 3:hat,kick and:hat 4:hat,snare and:hat' \
+    drumkick-cli '1:kick,hat and:kick,hat 2:hat,snare and:hat 3:hat,kick and:hat 4:hat,snare and:hat' \
         --bpm 80 \
         -s kick="../avl-drumkits/Samples/36-Ludwig26Kick-3.flac" \
         -s snare="../avl-drumkits/Samples/38-PearlSnare2-2.flac" \
