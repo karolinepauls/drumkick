@@ -18,10 +18,9 @@ use ratatui::{
     widgets::{Block, Borders, Padding, Paragraph, Widget},
 };
 use std::io::{self};
-use std::sync::mpsc::{Receiver, SyncSender};
-use std::{thread, time};
+use std::time;
 
-use drumkick::{Command, DrumkickOpts, Response, ResponseLevel, Track, start_drumkick};
+use drumkick::{DrumkickOpts, MachineHandle, Response, ResponseLevel, Track};
 
 const UI_POLL_DURATION: time::Duration = time::Duration::from_millis(100);
 const DEBUG_MESSAGES_CAPACITY: usize = 20;
@@ -79,7 +78,7 @@ impl BPMInput<'_> {
         textarea.set_cursor_line_style(Self::cursor_line_style());
         textarea.set_cursor_style(Self::hidden_cursor_style());
 
-        textarea.set_block(Block::new().padding(Padding::top(2)));
+        textarea.set_block(Block::new().padding(Padding::top(1)));
 
         Self { input: textarea }
     }
@@ -139,33 +138,27 @@ impl<'a> Widget for &BPMInput<'a> {
 }
 
 #[derive(Debug)]
-pub struct App<'textarea_block_why_is_it_even_here> {
-    cmd_sender: SyncSender<Command>,
-    resp_receiver: Receiver<Response>,
-    bpm: f64,
-    playing: bool,
+pub struct App<'certainly_something> {
+    drumkick: MachineHandle,
     exit: bool,
     error: Option<String>,
     user_message: Option<String>,
     debug_messages: VecDeque<String>,
-    bpm_input: BPMInput<'textarea_block_why_is_it_even_here>,
+    bpm_input: BPMInput<'certainly_something>,
     bpm_input_focused: bool,
 }
 
 impl App<'_> {
     pub fn new(opts: DrumkickOpts, track: Track) -> Result<Self, Box<dyn std::error::Error>> {
-        let bpm = track.bpm;
-        let (cmd_sender, resp_receiver) = start_drumkick(opts, track)?;
+        let drumkick = MachineHandle::new(opts, track)?;
+        let input = BPMInput::new(drumkick.bpm());
         Ok(Self {
-            cmd_sender,
-            resp_receiver,
-            bpm,
-            playing: false,
+            drumkick,
             exit: false,
             error: None,
             user_message: None,
             debug_messages: VecDeque::new(),
-            bpm_input: BPMInput::new(bpm),
+            bpm_input: input,
             bpm_input_focused: false,
         })
     }
@@ -174,8 +167,7 @@ impl App<'_> {
         &mut self,
         terminal: &mut DefaultTerminal,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.cmd_sender.send(Command::Play)?;
-        self.playing = true;
+        self.drumkick.play()?;
 
         while !self.exit {
             terminal.draw(|frame| self.draw(frame))?;
@@ -202,7 +194,12 @@ impl App<'_> {
         let title = Line::from(vec![
             " drumkick".bold(),
             " - ".into(),
-            self.user_message.as_deref().unwrap_or("").gray(),
+            (if self.drumkick.playing() {
+                "playing"
+            } else {
+                "paused"
+            })
+            .into(),
             " ".into(),
         ]);
 
@@ -228,8 +225,11 @@ impl App<'_> {
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints(vec![
+                // User message
+                Constraint::Max(3),
+                // BPM layout and input
                 Constraint::Max(4),
-                // setting BPM
+                // Empty
                 Constraint::Fill(1),
                 // Debug output
                 Constraint::Fill(1),
@@ -239,6 +239,17 @@ impl App<'_> {
         frame.render_widget(outer_block, area);
         frame.render_widget(block, outer_layout[0]);
 
+        // User message
+        let user_message = Text::from(vec![Line::from(vec![
+            self.user_message.as_deref().unwrap_or("").gray(),
+        ])]);
+
+        frame.render_widget(
+            Paragraph::new(user_message).centered().block(Block::new()),
+            layout[0].centered_vertically(Constraint::Length(1)),
+        );
+
+        // BPM layout
         let bpm_setting_layout = Layout::default()
             .direction(Direction::Horizontal)
             .constraints(vec![
@@ -246,7 +257,7 @@ impl App<'_> {
                 Constraint::Max(1),
                 Constraint::Fill(1),
             ])
-            .split(layout[0]);
+            .split(layout[1]);
 
         // BPM input label
         frame.render_widget(
@@ -256,7 +267,7 @@ impl App<'_> {
                 "BPM:"
             }))
             .right_aligned()
-            .block(Block::new().padding(Padding::top(2))),
+            .block(Block::new().padding(Padding::top(1))),
             bpm_setting_layout[0],
         );
 
@@ -276,11 +287,11 @@ impl App<'_> {
         ]);
         frame.render_widget(
             Paragraph::new(status_text).centered().block(Block::new()),
-            layout[1],
+            layout[2],
         );
 
         // Debug UI
-        let debug_rect = layout[2];
+        let debug_rect = layout[3];
         let lines_available = usize::from(debug_rect.height).saturating_sub(2);
         let debug_message_text = Text::from_iter(
             self.debug_messages
@@ -301,7 +312,7 @@ impl App<'_> {
 
     fn handle_events(&mut self) -> io::Result<bool> {
         let mut backend_resp_available = false;
-        for resp in self.resp_receiver.try_iter() {
+        for resp in self.drumkick.iter_resposes() {
             backend_resp_available = true;
             match resp {
                 Response {
@@ -356,7 +367,7 @@ impl App<'_> {
     fn handle_normal_key_event(&mut self, key_event: KeyEvent) {
         match (key_event.code, key_event.modifiers) {
             (Char('q'), _) => self.exit(),
-            (Char(' '), _) => self.toggle_pause(),
+            (Char(' '), _) => self.toggle_playing(),
             (Char('+') | Char('=') | KeyCode::Up, _) => self.change_bpm(5.0),
             (Char('-') | Char('_') | KeyCode::Down, _) => self.change_bpm(-5.0),
             (KeyCode::Enter, _) => self.set_bpm_input_focused(true),
@@ -387,26 +398,18 @@ impl App<'_> {
     }
 
     fn exit(&mut self) {
-        if let Err(err) = self.cmd_sender.send(Command::Stop) {
+        if let Err(err) = self.drumkick.stop() {
             self.set_error(err);
         }
-
-        thread::sleep(time::Duration::from_millis(50));
         self.exit = true;
     }
 
-    fn toggle_pause(&mut self) {
-        let command = if self.playing {
-            Command::Pause
-        } else {
-            Command::Play
-        };
+    fn toggle_playing(&mut self) {
+        let result = self.drumkick.toggle_playing();
 
-        if let Err(err) = self.cmd_sender.send(command) {
+        if let Err(err) = result {
             self.set_error(err);
-        }
-
-        self.playing = !self.playing;
+        };
     }
 
     fn set_bpm_input_focused(&mut self, focused: bool) {
@@ -415,15 +418,15 @@ impl App<'_> {
     }
 
     fn change_bpm(&mut self, diff: f64) {
-        self.set_bpm(self.bpm + diff)
+        self.set_bpm(self.drumkick.bpm() + diff)
     }
 
     fn set_bpm(&mut self, new_bpm: f64) {
-        self.bpm = new_bpm;
-        if let Err(err) = self.cmd_sender.send(Command::SetBPM(new_bpm)) {
+        if let Err(err) = self.drumkick.set_bpm(new_bpm) {
             self.set_error(err);
         } else {
             self.clear_error();
+            self.bpm_input.set_content(&self.drumkick.bpm().to_string());
         }
     }
 }

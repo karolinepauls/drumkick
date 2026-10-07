@@ -12,13 +12,10 @@ use crossterm::{
     terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode},
 };
 use std::fmt::{self, Write as _};
-use std::io::{self};
-use std::thread;
+use std::io;
 use std::time;
 
-use drumkick::{
-    Command, DrumkickOpts, MAX_BPM, MIN_BPM, Response, ResponseLevel, Track, start_drumkick,
-};
+use drumkick::{DrumkickOpts, MachineHandle, Response, ResponseLevel, Track};
 
 use std::panic;
 
@@ -132,48 +129,37 @@ pub fn run_cli(opts: DrumkickOpts, track: Track) -> Result<(), Box<dyn std::erro
         default_panic(info);
     }));
 
-    let mut bpm = track.bpm;
-    let mut playing = true;
-
-    let (cmd_sender, resp_receiver) = start_drumkick(opts, track)?;
-    cmd_sender.send(Command::Play)?;
-    let mut input = bpm.to_string();
+    let mut drumkick = MachineHandle::new(opts, track)?;
+    drumkick.play()?;
+    let mut input = drumkick.bpm().to_string();
 
     print_help_line()?;
     loop {
         let maybe_terminal_event = read_key()?;
 
-        for resp in resp_receiver.try_iter() {
+        for resp in drumkick.iter_resposes() {
             print_response(&resp)?;
         }
 
-        print_bpm_input_line(input.as_str(), playing)?;
+        print_bpm_input_line(input.as_str(), drumkick.playing())?;
 
         if let Some(event) = maybe_terminal_event {
             match (event.code, event.modifiers) {
                 (Char(' '), _) => {
-                    cmd_sender.send(if playing {
-                        Command::Pause
-                    } else {
-                        Command::Play
-                    })?;
-                    playing = !playing;
+                    drumkick.toggle_playing()?;
                 }
                 (Char('c'), KeyModifiers::CONTROL) | (Char('q'), _) => {
                     clear_line()?;
-                    cmd_sender.send(Command::Stop)?;
-                    thread::sleep(time::Duration::from_millis(50));
+                    drumkick.stop()?;
                     break;
                 }
                 (Char('+') | Char('=') | KeyCode::Up, _) => {
-                    bpm = (bpm + 5.0).clamp(MIN_BPM, MAX_BPM);
-                    cmd_sender.send(Command::SetBPM(bpm))?;
-                    overwrite_string(&mut input, bpm)?;
+                    drumkick.set_bpm(drumkick.bpm() + 5.0)?;
+                    overwrite_string(&mut input, drumkick.bpm())?;
                 }
                 (Char('-') | Char('_') | KeyCode::Down, _) => {
-                    bpm = (bpm - 5.0).clamp(MIN_BPM, MAX_BPM);
-                    cmd_sender.send(Command::SetBPM(bpm))?;
-                    overwrite_string(&mut input, bpm)?;
+                    drumkick.set_bpm(drumkick.bpm() - 5.0)?;
+                    overwrite_string(&mut input, drumkick.bpm())?;
                 }
                 (Char(ch @ '0'..='9') | Char(ch @ '.'), _) => {
                     input.push(ch);
@@ -183,10 +169,9 @@ pub fn run_cli(opts: DrumkickOpts, track: Track) -> Result<(), Box<dyn std::erro
                 }
                 (KeyCode::Enter, _) => match parsing::parse_bpm(&input) {
                     Ok(new_bpm) => {
-                        bpm = new_bpm;
-                        overwrite_string(&mut input, bpm)?;
+                        drumkick.set_bpm(new_bpm)?;
+                        overwrite_string(&mut input, drumkick.bpm())?;
                         clear_line()?;
-                        cmd_sender.send(Command::SetBPM(bpm))?;
                     }
                     Err(mut msg) => {
                         msg.push_str("\r\n");

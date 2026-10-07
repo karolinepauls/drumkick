@@ -4,12 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-kira = "0.12.3"
+cpal = { git = "https://github.com/RustAudio/cpal.git", rev = "79275c2313da30e9f8b1ad8168385d091a2c9ada" }
 pest = "2.8.8"
 pest_derive = "2.8.8"
 thiserror = "2.0.21"
-symphonia-core = "0.6.0"  # needs to be synchronised with kira
+symphonia-core = "0.6.1"
 indexmap = "2.14.2"
+symphonia = { version = "0.6.1", features = ["flac", "mp3", "ogg", "pcm", "vorbis", "wav"] }
 
 [dev-dependencies]
 rstest = "0.27.0"

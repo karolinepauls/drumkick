@@ -2,7 +2,7 @@ mod cli;
 mod parsing;
 mod term;
 mod tui;
-use clap::{Parser, builder::RangedU64ValueParser, value_parser};
+use clap::{Parser, value_parser};
 use indexmap::IndexMap;
 
 use std::collections::HashSet;
@@ -10,11 +10,11 @@ use std::fmt;
 use thiserror::Error;
 
 use drumkick::{
-    BUFFER_SIZE, DrumkickOpts, PRECISION, Track,
+    BUFFER_SIZE, DrumkickOpts, Track,
     embedded_samples::{EMBEDDED_SAMPLE_NAMES, get_embedded_sample_names},
     measure_grammar::{BEAT_FRACTIONS, BeatSpec, MeasureParseError, backtick_quote, parse_measure},
     pest_set_error_detail,
-    samples::load_samples,
+    samples::load_samples_into_sequence,
 };
 
 #[repr(i32)]
@@ -78,18 +78,6 @@ This will result in the `kick` sample being available in the `MEASURE` argument.
 
     #[arg(
         long,
-        default_value_t = PRECISION,
-        value_parser = RangedU64ValueParser::<usize>::new().range(1..=1024),
-        help = "Beat scheduling precision in audio wave samples (lower → better precision, more CPU).
---precision=32 at 48kHz gives about 1.33ms jitter which should be acceptable in any application.
-This argument shouldn't be necessary and all sounds should be scheduled at individual wave sample precision.
-The high-level sound library used here (kira) can only schedule playback at the precision of its internal buffer size,
-which can be configured by this argument."
-    )]
-    precision: usize,
-
-    #[arg(
-        long,
         default_value_t = BUFFER_SIZE,
         value_parser = value_parser!(u32).range(1..),
         help = "Audio host buffer size in audio wave samples (lower → better responsiveness, more CPU).
@@ -149,20 +137,19 @@ fn init() -> Result<(Args, DrumkickOpts, Track), Box<dyn std::error::Error>> {
     let track_spec =
         unwrap_or_terminate(interpret_args(&args), ExitCodes::CantInterpretArgs.code());
 
-    let beats = unwrap_or_terminate(
-        load_samples(&track_spec.measure_beats, &track_spec.sample_locations),
+    let sequence = unwrap_or_terminate(
+        load_samples_into_sequence(&track_spec.measure_beats, &track_spec.sample_locations),
         ExitCodes::CantLoadSamples.code(),
     );
 
     let opts = DrumkickOpts {
         buffer_size: args.buffer_size,
-        precision: args.precision,
         sound_capacity: 512,
         message_buffer_size: 32,
     };
     let track = Track {
         bpm: track_spec.bpm,
-        measure_beats: beats,
+        sequence,
     };
 
     Ok((args, opts, track))
@@ -170,7 +157,7 @@ fn init() -> Result<(Args, DrumkickOpts, Track), Box<dyn std::error::Error>> {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (args, opts, track) = init()?;
-    eprintln!("Measure has {} beats", track.beats_in_measure());
+    eprintln!("Measure has {} beats", track.sequence.beat_count());
 
     if args.headless {
         cli::run_cli(opts, track)

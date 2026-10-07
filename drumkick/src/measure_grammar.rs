@@ -1,8 +1,10 @@
+use crate::sequence::{BeatFraction, BeatNo};
 use pest::Parser as PestParser;
 use pest::error::Error as PestError;
 use pest::iterators::Pair;
 use pest_derive::Parser as PestParser;
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 use std::sync::LazyLock;
 use thiserror::Error;
 
@@ -13,7 +15,7 @@ struct MeasureGrammar;
 #[derive(Debug, PartialEq)]
 pub struct BeatSpec {
     pub samples: Vec<String>,
-    pub time: f64,
+    pub beat_no: BeatNo,
 }
 
 #[derive(Error, Debug, PartialEq)]
@@ -24,23 +26,23 @@ pub enum MeasureParseError {
     LogicalError(String),
 }
 
-pub static BEAT_FRACTIONS: &[(&str, f64)] = &[
-    ("e", 0.25),
-    ("&", 0.5),
-    ("and", 0.5),
-    ("ah", 0.75),
-    ("uh", 0.75),
-    ("a", 0.75),
-    ("trip", 1.0 / 3.0),
-    ("tri", 1.0 / 3.0),
-    ("let", 2.0 / 3.0),
-    ("plet", 2.0 / 3.0),
+pub static BEAT_FRACTIONS: &[(&str, BeatFraction)] = &[
+    ("e", BeatFraction::ONE_FOURTH),
+    ("&", BeatFraction::HALF),
+    ("and", BeatFraction::HALF),
+    ("ah", BeatFraction::THREE_FOURTHS),
+    ("uh", BeatFraction::THREE_FOURTHS),
+    ("a", BeatFraction::THREE_FOURTHS),
+    ("trip", BeatFraction::ONE_THIRD),
+    ("tri", BeatFraction::ONE_THIRD),
+    ("let", BeatFraction::TWO_THIRDS),
+    ("plet", BeatFraction::TWO_THIRDS),
 ];
 
-static BEAT_FRACTION_MAP: LazyLock<HashMap<&str, f64>> =
+static BEAT_FRACTION_MAP: LazyLock<HashMap<&str, BeatFraction>> =
     LazyLock::new(|| BEAT_FRACTIONS.iter().copied().collect());
 
-fn name_to_beat_fraction(name: &str) -> f64 {
+fn name_to_beat_fraction(name: &str) -> BeatFraction {
     *(BEAT_FRACTION_MAP
         .get(name)
         .unwrap_or_else(|| panic!("beat fraction defined for name: {}", name)))
@@ -49,7 +51,7 @@ fn name_to_beat_fraction(name: &str) -> f64 {
 fn parse_measure_ast(measure_ast: Pair<Rule>) -> Result<Vec<BeatSpec>, String> {
     let mut beats = Vec::new();
     let mut position_str = "1";
-    let mut position = 1.0;
+    let mut beat_no = BeatNo::ONE;
 
     for measure_component in measure_ast.into_inner() {
         match measure_component.as_rule() {
@@ -58,7 +60,7 @@ fn parse_measure_ast(measure_ast: Pair<Rule>) -> Result<Vec<BeatSpec>, String> {
 
                 for beat_component in measure_component.into_inner() {
                     let mut new_position_str = position_str;
-                    let mut new_position = position;
+                    let mut new_position = beat_no;
 
                     match beat_component.as_rule() {
                         Rule::placement => {
@@ -67,21 +69,34 @@ fn parse_measure_ast(measure_ast: Pair<Rule>) -> Result<Vec<BeatSpec>, String> {
 
                             new_position_str = placement.as_str();
                             new_position = match placement.as_rule() {
-                                Rule::beat_no => new_position_str
-                                    .parse::<u64>()
-                                    .expect("beat placement must be numeric")
-                                    as f64,
+                                Rule::beat_no => {
+                                    let no = new_position_str
+                                        .parse::<NonZeroU32>()
+                                        .expect("beat placement must be numeric");
+                                    BeatNo::even_nonzero(no)
+                                }
                                 Rule::beat_fraction_name => {
-                                    position.floor() + name_to_beat_fraction(new_position_str)
+                                    beat_no.with_fraction(name_to_beat_fraction(new_position_str))
                                 }
                                 Rule::beat_fraction => {
                                     let (numerator_str, denominator_str) =
                                         new_position_str.split_once('/').expect("fraction string");
-                                    let numerator: f64 =
-                                        numerator_str.parse().expect("numerator f64");
-                                    let denominator: f64 =
-                                        denominator_str.parse().expect("denominator f64");
-                                    position.floor() + numerator / denominator
+                                    let numerator: u32 =
+                                        numerator_str.parse().expect("u32 beat numerator");
+                                    let denominator: NonZeroU32 =
+                                        denominator_str.parse().expect("non-zero beat denominator");
+
+                                    let fraction =
+                                        BeatFraction::new_nonzero(numerator, denominator).map_err(
+                                            |e| {
+                                                format!(
+                                                    "beat fraction {} is invalid: error {e}",
+                                                    backtick_quote(new_position_str)
+                                                )
+                                            },
+                                        )?;
+
+                                    beat_no.with_fraction(fraction)
                                 }
                                 _ => unreachable!("in beat placement {}", new_position_str),
                             }
@@ -103,7 +118,7 @@ fn parse_measure_ast(measure_ast: Pair<Rule>) -> Result<Vec<BeatSpec>, String> {
                         }
                     };
 
-                    if new_position < position {
+                    if new_position < beat_no {
                         return Err(format!(
                             "beat number decreased: {} → {}",
                             backtick_quote(position_str),
@@ -111,14 +126,11 @@ fn parse_measure_ast(measure_ast: Pair<Rule>) -> Result<Vec<BeatSpec>, String> {
                         ));
                     }
 
-                    position = new_position;
+                    beat_no = new_position;
                     position_str = new_position_str;
                 }
 
-                beats.push(BeatSpec {
-                    samples,
-                    time: position,
-                });
+                beats.push(BeatSpec { samples, beat_no });
             }
             Rule::EOI => (),
             other_rule => {
@@ -202,7 +214,7 @@ mod test {
             parse_measure(measure_str, STANDARD_SAMPLE_NAMES).unwrap(),
             [BeatSpec {
                 samples: vec!["click".to_string()],
-                time: 1.0,
+                beat_no: BeatNo::ONE,
             }]
         );
     }
@@ -214,15 +226,15 @@ mod test {
             [
                 BeatSpec {
                     samples: vec!["CLICK".to_string()],
-                    time: 1.0,
+                    beat_no: BeatNo::ONE,
                 },
                 BeatSpec {
                     samples: vec!["click".to_string()],
-                    time: 2.0,
+                    beat_no: BeatNo::even(2).unwrap(),
                 },
                 BeatSpec {
                     samples: vec!["click".to_string()],
-                    time: 3.0,
+                    beat_no: BeatNo::even(3).unwrap(),
                 },
             ]
         );
@@ -235,15 +247,15 @@ mod test {
             [
                 BeatSpec {
                     samples: vec![],
-                    time: 1.0,
+                    beat_no: BeatNo::ONE,
                 },
                 BeatSpec {
                     samples: vec!["click".to_string()],
-                    time: 2.0,
+                    beat_no: BeatNo::even(2).unwrap(),
                 },
                 BeatSpec {
                     samples: vec![],
-                    time: 3.0,
+                    beat_no: BeatNo::even(3).unwrap(),
                 },
             ]
         );
@@ -256,15 +268,15 @@ mod test {
             [
                 BeatSpec {
                     samples: vec!["CLICK".to_string()],
-                    time: 1.0,
+                    beat_no: BeatNo::ONE,
                 },
                 BeatSpec {
                     samples: vec![],
-                    time: 2.0,
+                    beat_no: BeatNo::even(2).unwrap(),
                 },
                 BeatSpec {
                     samples: vec!["click".to_string()],
-                    time: 3.0,
+                    beat_no: BeatNo::even(3).unwrap(),
                 },
             ]
         );
@@ -277,19 +289,19 @@ mod test {
             [
                 BeatSpec {
                     samples: vec!["DRIP".to_string()],
-                    time: 1.0,
+                    beat_no: BeatNo::ONE,
                 },
                 BeatSpec {
                     samples: vec!["click".to_string()],
-                    time: 1.5,
+                    beat_no: BeatNo::new(1, 1, 2).unwrap(),
                 },
                 BeatSpec {
                     samples: vec!["CLICK".to_string()],
-                    time: 2.0,
+                    beat_no: BeatNo::even(2).unwrap(),
                 },
                 BeatSpec {
                     samples: vec!["click".to_string()],
-                    time: 2.5,
+                    beat_no: BeatNo::new(2, 1, 2).unwrap(),
                 },
             ]
         );
@@ -309,23 +321,23 @@ mod test {
             [
                 BeatSpec {
                     samples: vec!["DRIP".to_string()],
-                    time: 1.0,
+                    beat_no: BeatNo::ONE,
                 },
                 BeatSpec {
                     samples: vec!["hat".to_string()],
-                    time: 1.25,
+                    beat_no: BeatNo::new(1, 1, 4).unwrap(),
                 },
                 BeatSpec {
                     samples: vec!["click".to_string()],
-                    time: 1.5,
+                    beat_no: BeatNo::new(1, 1, 2).unwrap(),
                 },
                 BeatSpec {
                     samples: vec!["hat".to_string()],
-                    time: 1.75,
+                    beat_no: BeatNo::new(1, 3, 4).unwrap(),
                 },
                 BeatSpec {
                     samples: vec!["CLICK".to_string()],
-                    time: 2.0,
+                    beat_no: BeatNo::even(2).unwrap(),
                 },
             ]
         );
@@ -345,19 +357,19 @@ mod test {
             [
                 BeatSpec {
                     samples: vec!["DRIP".to_string()],
-                    time: 1.0,
+                    beat_no: BeatNo::ONE,
                 },
                 BeatSpec {
                     samples: vec!["hat".to_string()],
-                    time: 1.0 + 1.0 / 3.0,
+                    beat_no: BeatNo::new(1, 1, 3).unwrap(),
                 },
                 BeatSpec {
                     samples: vec!["click".to_string()],
-                    time: 1.0 + 2.0 / 3.0,
+                    beat_no: BeatNo::new(1, 2, 3).unwrap(),
                 },
                 BeatSpec {
                     samples: vec!["CLICK".to_string()],
-                    time: 2.0,
+                    beat_no: BeatNo::even(2).unwrap(),
                 },
             ]
         );
@@ -374,27 +386,27 @@ mod test {
             [
                 BeatSpec {
                     samples: vec!["CLICK".to_string()],
-                    time: 1.0,
+                    beat_no: BeatNo::ONE,
                 },
                 BeatSpec {
                     samples: vec!["click".to_string()],
-                    time: 1.0 + 1.0 / 5.0,
+                    beat_no: BeatNo::new(1, 1, 5).unwrap(),
                 },
                 BeatSpec {
                     samples: vec!["click".to_string()],
-                    time: 1.0 + 2.0 / 5.0,
+                    beat_no: BeatNo::new(1, 2, 5).unwrap(),
                 },
                 BeatSpec {
                     samples: vec!["click".to_string()],
-                    time: 1.0 + 3.0 / 5.0,
+                    beat_no: BeatNo::new(1, 3, 5).unwrap(),
                 },
                 BeatSpec {
                     samples: vec!["click".to_string()],
-                    time: 1.0 + 4.0 / 5.0,
+                    beat_no: BeatNo::new(1, 4, 5).unwrap(),
                 },
                 BeatSpec {
                     samples: vec!["CLICK".to_string()],
-                    time: 2.0,
+                    beat_no: BeatNo::even(2).unwrap(),
                 },
             ]
         );
@@ -406,7 +418,7 @@ mod test {
             parse_measure("1:click,drip", STANDARD_SAMPLE_NAMES).unwrap(),
             [BeatSpec {
                 samples: vec!["click".to_string(), "drip".to_string()],
-                time: 1.0,
+                beat_no: BeatNo::ONE,
             }]
         );
 
@@ -419,19 +431,19 @@ mod test {
             [
                 BeatSpec {
                     samples: vec!["DRIP".to_string()],
-                    time: 1.0,
+                    beat_no: BeatNo::ONE,
                 },
                 BeatSpec {
                     samples: vec!["hat".to_string(), "click".to_string()],
-                    time: 1.0 + 1.0 / 3.0,
+                    beat_no: BeatNo::new(1, 1, 3).unwrap(),
                 },
                 BeatSpec {
                     samples: vec!["click".to_string(), "hat".to_string()],
-                    time: 1.0 + 2.0 / 3.0,
+                    beat_no: BeatNo::new(1, 2, 3).unwrap(),
                 },
                 BeatSpec {
                     samples: vec!["CLICK".to_string()],
-                    time: 2.0,
+                    beat_no: BeatNo::even(2).unwrap(),
                 },
             ]
         );

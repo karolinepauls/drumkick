@@ -11,6 +11,7 @@ Features
 - Sample loading from files
 - Any beat count supported
 - Any beat subdivision (want quintuplets - that's as simple as ``1/5``)
+- Formats: mp3, ogg (vorbis), flac, wav, pcm
 
 **Unsupported but planned:**
 
