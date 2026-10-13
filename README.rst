@@ -11,17 +11,24 @@ Features
 - Sample loading from files
 - Any beat count supported
 - Any beat subdivision (want quintuplets - that's as simple as ``1/5``)
+- BPM changes
+- Polyrhythms (measures played in parallel)
 - Formats: mp3, ogg (vorbis), flac, wav, pcm
 
 **Unsupported but planned:**
 
-- shifting meters and looping
+- meter delay/lag (start playing N beats after other meters)
 
-- polyrhythms (measures played in parallel)
+- shifting meters (TBH this would be simply visual, since this program doesn't
+  support full metric signatures but just beat counts with subdivisions)
 
-- BPM changes
+- double time meters (and generally, meters tempo multiplier)
 
 - "human" timing feel
+
+- programming (arranging predefined meters like "2 bars of A, 6 bars of B, ...")
+
+- web GUI (WASM) and a desktop GUI
 
 Examples
 --------

@@ -4,6 +4,7 @@ use pest::error::Error as PestError;
 use pest::iterators::Pair;
 use pest_derive::Parser as PestParser;
 use std::collections::HashMap;
+use std::fmt;
 use std::num::NonZeroU32;
 use std::sync::LazyLock;
 use thiserror::Error;
@@ -12,10 +13,64 @@ use thiserror::Error;
 #[grammar = "measure.pest"]
 struct MeasureGrammar;
 
-#[derive(Debug, PartialEq)]
+pub trait ToSource {
+    fn to_source(&self) -> String;
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct BeatSpec {
     pub samples: Vec<String>,
     pub beat_no: BeatNo,
+}
+
+impl fmt::Display for BeatSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+        format!("{}:{}", self.beat_no, self.samples.join(",")).fmt(f)
+    }
+}
+
+impl ToSource for BeatSpec {
+    fn to_source(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl ToSource for [BeatSpec] {
+    /// Produce canonical syntax useful for pretty-printing.
+    fn to_source(&self) -> String {
+        let mut source = String::with_capacity(64);
+
+        let mut last_beat_no_integer = 0;
+        for beat_spec in self.iter() {
+            // If moving from 1 to e.g. 2 1/2, then make it "... 2: 1/2:..."
+            if beat_spec.beat_no.beat.get() != last_beat_no_integer {
+                source.push_str(&format!("{}:", beat_spec.beat_no.beat));
+            }
+            if beat_spec.samples.is_empty() {
+                source.push(' ');
+            }
+
+            if !beat_spec.beat_no.fraction.is_zero() {
+                source.push_str(&format!(
+                    "{}:",
+                    beat_spec
+                        .beat_no
+                        .fraction_name
+                        .unwrap_or(&beat_spec.beat_no.fraction.to_string())
+                ));
+            }
+
+            for sample_name in beat_spec.samples.iter() {
+                source.push_str(&format!("{sample_name},"));
+            }
+            source.pop(); // Pop last trailing comma.
+
+            source.push(' ');
+            last_beat_no_integer = beat_spec.beat_no.beat.get();
+        }
+        source.pop(); // Pop last space
+        source
+    }
 }
 
 #[derive(Error, Debug, PartialEq)]
@@ -42,10 +97,11 @@ pub static BEAT_FRACTIONS: &[(&str, BeatFraction)] = &[
 static BEAT_FRACTION_MAP: LazyLock<HashMap<&str, BeatFraction>> =
     LazyLock::new(|| BEAT_FRACTIONS.iter().copied().collect());
 
-fn name_to_beat_fraction(name: &str) -> BeatFraction {
-    *(BEAT_FRACTION_MAP
-        .get(name)
-        .unwrap_or_else(|| panic!("beat fraction defined for name: {}", name)))
+fn resolve_beat_fraction_name(name: &str) -> (&'static str, BeatFraction) {
+    let (&fraction_name, &fraction) = BEAT_FRACTION_MAP
+        .get_key_value(name)
+        .unwrap_or_else(|| panic!("beat fraction defined for name: {}", name));
+    (fraction_name, fraction)
 }
 
 fn parse_measure_ast(measure_ast: Pair<Rule>) -> Result<Vec<BeatSpec>, String> {
@@ -76,7 +132,9 @@ fn parse_measure_ast(measure_ast: Pair<Rule>) -> Result<Vec<BeatSpec>, String> {
                                     BeatNo::even_nonzero(no)
                                 }
                                 Rule::beat_fraction_name => {
-                                    beat_no.with_fraction(name_to_beat_fraction(new_position_str))
+                                    let (fraction_name, fraction) =
+                                        resolve_beat_fraction_name(new_position_str);
+                                    beat_no.with_named_fraction(fraction_name, fraction)
                                 }
                                 Rule::beat_fraction => {
                                     let (numerator_str, denominator_str) =

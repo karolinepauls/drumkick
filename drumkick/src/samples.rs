@@ -1,5 +1,4 @@
-use indexmap::{IndexMap, IndexSet};
-use std::collections::HashMap;
+use indexmap::IndexMap;
 use std::sync::Arc;
 use symphonia::core::errors::Error as SymphoniaError;
 use thiserror::Error;
@@ -25,22 +24,19 @@ pub struct MissingSamples {
 
 #[derive(Error, Debug)]
 #[error(
-    "{} error{} loading samples:{}{}{}{}",
+    "{} error{} loading samples:{}{}",
     self.error_count(),
     if self.has_multiple_errors() { "s" } else { "" },
     if self.has_multiple_errors() { "\n" } else { " " },
-    .missing_samples.as_ref().map_or_default(ToString::to_string),
-    if .missing_samples.is_some() { "\n" } else { "" },
-    .from_file_errors.iter().map(|(sample, err)| format!("error loading sample {}: {err}", backtick_quote(sample))).collect::<Vec<_>>().join("\n")
+    .errors.iter().map(|(sample, err)| format!("error loading sample {}: {err}", backtick_quote(sample))).collect::<Vec<_>>().join("\n")
 )]
 pub struct SampleLoadingErrors {
-    missing_samples: Option<MissingSamples>,
-    from_file_errors: Vec<(String, SymphoniaError)>,
+    errors: Vec<(String, SymphoniaError)>,
 }
 
 impl SampleLoadingErrors {
     fn error_count(&self) -> usize {
-        self.from_file_errors.len() + self.missing_samples.is_some() as usize
+        self.errors.len()
     }
 
     fn has_multiple_errors(&self) -> bool {
@@ -48,76 +44,79 @@ impl SampleLoadingErrors {
     }
 }
 
-pub fn load_samples_into_sequence<'a>(
-    measure_beats: &[BeatSpec],
-    sample_locations: &IndexMap<&'a str, &'a str>,
-) -> Result<Sequence, SampleLoadingErrors> {
-    let mut name_to_sample: HashMap<&str, Arc<sound::LoadedSource>> = HashMap::new();
-    let mut missing_samples: Vec<String> = Vec::new();
+fn load_embedded_sample(name: &str) -> Result<Option<Arc<sound::LoadedSource>>, SymphoniaError> {
+    get_embedded_sample(name)
+        .map(sound::load_from_cursor)
+        .transpose()
+}
+
+pub fn load_samples<'a>(
+    sample_locations: &IndexMap<&str, &str>,
+) -> Result<IndexMap<String, Arc<sound::LoadedSource>>, SampleLoadingErrors> {
+    let mut name_to_sample: IndexMap<String, Arc<sound::LoadedSource>> = IndexMap::new();
     let mut errors: Vec<(&str, SymphoniaError)> = Vec::new();
 
-    let unique_beat_sample_names: IndexSet<_> = measure_beats
-        .iter()
-        .flat_map(|bs| &bs.samples)
-        .map(|s| s.as_str())
-        .collect();
-
-    for name in unique_beat_sample_names {
-        let sound_data = sample_locations
-            .get(name)
-            .map(|path| sound::load_from_path(path))
-            // Check for a sample embedded in the binary in case it isn't present in sample_locations.
-            .or_else(|| get_embedded_sample(name).map(sound::load_from_cursor));
+    for (&name, &path) in sample_locations.iter() {
+        let sound_data = sound::load_from_path(path);
 
         match sound_data {
-            Some(Ok(sound_data)) => {
+            Ok(sound_data) => {
                 eprintln!("Loaded sample {name} {}", sound_data.sample_rate);
-                name_to_sample.insert(name, sound_data);
+                name_to_sample.insert(name.to_string(), sound_data);
             }
-            Some(Err(err)) => {
+            Err(err) => {
                 errors.push((name, err));
-            }
-            None => {
-                missing_samples.push(name.to_owned());
             }
         }
     }
 
-    let missing_samples_error = if !missing_samples.is_empty() {
-        let all_sample_names: IndexSet<_> = get_embedded_sample_names()
-            .into_iter()
-            .chain(sample_locations.keys().cloned())
-            .collect();
-
-        Some(MissingSamples {
-            missing_samples,
-            available_samples: all_sample_names
-                .iter()
-                .cloned()
-                .map(String::from)
-                .collect::<Vec<String>>(),
-        })
-    } else {
-        None
-    };
-
-    if !errors.is_empty() || missing_samples_error.is_some() {
+    if !errors.is_empty() {
         return Err(SampleLoadingErrors {
-            missing_samples: missing_samples_error,
-            from_file_errors: errors
+            errors: errors
                 .into_iter()
                 .map(|(s, err)| (s.to_string(), err))
                 .collect(),
         });
     }
 
-    let items = measure_beats.iter().flat_map(|bs| {
-        let samples = bs
-            .samples
-            .iter()
-            .map(|sample_name| name_to_sample.get(sample_name.as_str()).unwrap().clone());
-        samples.map(|sample| SequenceItem::new(bs.beat_no, sample))
-    });
+    Ok(name_to_sample)
+}
+
+pub fn load_samples_into_sequence(
+    beats: &[BeatSpec],
+    name_to_sample: &IndexMap<String, Arc<sound::LoadedSource>>,
+) -> Result<Sequence, MissingSamples> {
+    let mut items = Vec::new();
+    let mut missing_samples = Vec::new();
+
+    for beat in beats {
+        for sample_name in beat.samples.iter() {
+            let loaded_sample = name_to_sample
+                .get(sample_name.as_str())
+                .map(Arc::clone)
+                // Check for a sample embedded in the binary in case it isn't present in sample_locations.
+                .or_else(|| {
+                    load_embedded_sample(sample_name.as_str()).unwrap_or_else(|e| {
+                        panic!("loading the embedded sample {sample_name} should not fail: {e}")
+                    })
+                });
+            match loaded_sample {
+                Some(sample) => items.push(SequenceItem::new(beat.beat_no, sample.clone())),
+                None => missing_samples.push(sample_name.to_string()),
+            }
+        }
+    }
+
+    if !missing_samples.is_empty() {
+        return Err(MissingSamples {
+            missing_samples,
+            available_samples: name_to_sample
+                .keys()
+                .cloned()
+                .chain(get_embedded_sample_names().into_iter().map(String::from))
+                .collect(),
+        });
+    }
 
     Ok(Sequence::new(items))
 }
@@ -125,12 +124,59 @@ pub fn load_samples_into_sequence<'a>(
 #[cfg(test)]
 mod test {
     use super::*;
+    use indexmap::IndexSet;
     use rstest::*;
 
     use crate::sequence::BeatNo;
 
+    fn sound_samples_to_bytes(samples: &Vec<f32>) -> Vec<u8> {
+        samples
+            .iter()
+            .flat_map(|&s| s.to_ne_bytes())
+            .collect::<Vec<_>>()
+    }
+
     #[rstest]
     fn test_load_embedded_samples() {
+        let parent_dir = env!("CARGO_MANIFEST_DIR");
+        let files = [
+            "click_strong.mp3",
+            "click_weak.mp3",
+            "drip_strong.mp3",
+            "drip_weak.mp3",
+        ];
+        let beats_vec: Vec<(&str, String)> = files
+            .iter()
+            .map(|&s| {
+                let mut path = parent_dir.to_string();
+                path.push_str("/samples/");
+                path.push_str(s);
+                (s, path)
+            })
+            .collect();
+        let beats: IndexMap<&str, &str> = beats_vec.iter().map(|(s, p)| (*s, p.as_str())).collect();
+
+        let samples = load_samples(&beats).unwrap();
+
+        assert_eq!(samples.len(), 4);
+        assert_eq!(
+            samples.keys().collect::<Vec<_>>(),
+            vec![
+                "click_strong.mp3",
+                "click_weak.mp3",
+                "drip_strong.mp3",
+                "drip_weak.mp3",
+            ]
+        );
+        let loaded_sources: IndexSet<Vec<u8>> = samples
+            .values()
+            .map(|loaded| sound_samples_to_bytes(&loaded.samples))
+            .collect();
+        assert_eq!(loaded_sources.len(), 4);
+    }
+
+    #[rstest]
+    fn test_load_embedded_samples_into_sequence() {
         let beats = vec![
             BeatSpec {
                 samples: vec![String::from("CLICK"), String::from("click")],
@@ -142,8 +188,42 @@ mod test {
             },
         ];
         let sequence = load_samples_into_sequence(&beats, &IndexMap::new()).unwrap();
-
-        assert_eq!(sequence.beat_count(), 2);
         assert_eq!(sequence.items.len(), 4);
+        assert_eq!(sequence.beat_count(), 2);
+
+        assert_eq!(
+            sequence
+                .items
+                .iter()
+                .map(|item| item.beat_no)
+                .collect::<Vec<_>>(),
+            vec![
+                BeatNo::ONE,
+                BeatNo::ONE,
+                BeatNo::even(2).unwrap(),
+                BeatNo::even(2).unwrap(),
+            ]
+        );
+
+        assert_eq!(
+            sequence
+                .items
+                .iter()
+                .map(|item| item.beat_no)
+                .collect::<Vec<_>>(),
+            vec![
+                BeatNo::ONE,
+                BeatNo::ONE,
+                BeatNo::even(2).unwrap(),
+                BeatNo::even(2).unwrap(),
+            ]
+        );
+
+        let loaded_sources: IndexSet<Vec<u8>> = sequence
+            .items
+            .iter()
+            .map(|item| sound_samples_to_bytes(&item.source.samples))
+            .collect();
+        assert_eq!(loaded_sources.len(), 4);
     }
 }

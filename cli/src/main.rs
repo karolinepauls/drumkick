@@ -13,8 +13,7 @@ use drumkick::{
     BUFFER_SIZE, DrumkickOpts, Track,
     embedded_samples::{EMBEDDED_SAMPLE_NAMES, get_embedded_sample_names},
     measure_grammar::{BEAT_FRACTIONS, BeatSpec, MeasureParseError, backtick_quote, parse_measure},
-    pest_set_error_detail,
-    samples::load_samples_into_sequence,
+    pest_set_error_detail, samples,
 };
 
 #[repr(i32)]
@@ -34,7 +33,7 @@ impl ExitCodes {
 #[command(version, about, long_about = None, next_line_help = true)]
 struct Args {
     #[arg(
-        default_value_t = "1:CLICK 2:click, 3:click, 4:click".to_string(),
+        default_value_t = "1:CLICK 2:click 3:click 4:click".to_string(),
         long_help = format!(
             "Rhythm track specification in the form of <PLACEMENT>:<SAMPLE>[,<SAMPLE>...]
 
@@ -137,8 +136,13 @@ fn init() -> Result<(Args, DrumkickOpts, Track), Box<dyn std::error::Error>> {
     let track_spec =
         unwrap_or_terminate(interpret_args(&args), ExitCodes::CantInterpretArgs.code());
 
+    let samples = unwrap_or_terminate(
+        samples::load_samples(&track_spec.sample_locations),
+        ExitCodes::CantLoadSamples.code(),
+    );
+
     let sequence = unwrap_or_terminate(
-        load_samples_into_sequence(&track_spec.measure_beats, &track_spec.sample_locations),
+        samples::load_samples_into_sequence(&track_spec.measure_beats, &samples),
         ExitCodes::CantLoadSamples.code(),
     );
 
@@ -149,6 +153,8 @@ fn init() -> Result<(Args, DrumkickOpts, Track), Box<dyn std::error::Error>> {
     };
     let track = Track {
         bpm: track_spec.bpm,
+        samples,
+        measure_beats: track_spec.measure_beats,
         sequence,
     };
 

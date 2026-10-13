@@ -64,20 +64,22 @@ impl BeatFraction {
 
 impl fmt::Display for BeatFraction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        write!(f, "{}/{}", self.numerator, self.denominator)
+        format!("{}/{}", self.numerator, self.denominator).fmt(f)
     }
 }
 
 #[derive(Copy, Clone, Debug)]
 pub struct BeatNo {
-    beat: NonZeroU32,
-    fraction: BeatFraction,
+    pub beat: NonZeroU32,
+    pub fraction: BeatFraction,
+    pub(crate) fraction_name: Option<&'static str>,
 }
 
 impl BeatNo {
     pub const ONE: Self = Self {
         beat: NonZeroU32::MIN,
         fraction: BeatFraction::ZERO,
+        fraction_name: None,
     };
 
     pub fn new(beat: u32, numerator: u32, denominator: u32) -> Result<Self, BeatError> {
@@ -87,6 +89,7 @@ impl BeatNo {
         Ok(Self {
             beat: NonZeroU32::new(beat).ok_or(BeatError::IllegalZeroBeatNo)?,
             fraction: BeatFraction::new(numerator, denominator)?,
+            fraction_name: None,
         })
     }
 
@@ -94,6 +97,7 @@ impl BeatNo {
         Self {
             beat,
             fraction: BeatFraction::ZERO,
+            fraction_name: None,
         }
     }
 
@@ -101,6 +105,7 @@ impl BeatNo {
         Ok(Self {
             beat: NonZeroU32::new(beat).ok_or(BeatError::IllegalZeroBeatNo)?,
             fraction: BeatFraction::ZERO,
+            fraction_name: None,
         })
     }
 
@@ -108,6 +113,15 @@ impl BeatNo {
         Self {
             beat: self.beat,
             fraction,
+            fraction_name: None,
+        }
+    }
+
+    pub fn with_named_fraction(&self, fraction_name: &'static str, fraction: BeatFraction) -> Self {
+        Self {
+            beat: self.beat,
+            fraction,
+            fraction_name: Some(fraction_name),
         }
     }
 
@@ -153,12 +167,11 @@ impl Ord for BeatNo {
 
 impl fmt::Display for BeatNo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        write!(f, "{}", self.beat)?;
-        if !self.fraction.is_zero() {
-            write!(f, " ")?;
-            self.fraction.fmt(f)?;
+        if self.fraction.is_zero() {
+            format!("{}", self.beat).fmt(f)
+        } else {
+            format!("{} {}", self.beat, self.fraction).fmt(f)
         }
-        Ok(())
     }
 }
 

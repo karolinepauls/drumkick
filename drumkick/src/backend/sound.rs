@@ -11,7 +11,7 @@ use symphonia::core::formats::{FormatReader, TrackType};
 use symphonia::core::io::MediaSourceStream;
 
 pub struct LoadedSource {
-    samples: Vec<f32>,
+    pub(crate) samples: Vec<f32>,
     pub(crate) channels: usize,
     pub(crate) sample_rate: u32,
 }

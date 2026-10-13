@@ -15,7 +15,9 @@ use std::fmt::{self, Write as _};
 use std::io;
 use std::time;
 
-use drumkick::{DrumkickOpts, MachineHandle, Response, ResponseLevel, Track};
+use drumkick::{
+    BeatNo, DrumkickOpts, MachineHandle, PlaybackProgress, Response, ResponseLevel, Track,
+};
 
 use std::panic;
 
@@ -73,12 +75,15 @@ fn print_response(response: &Response) -> io::Result<()> {
 /// Draw BPM input line with a fake cursor (park the real curor at the beginning)
 ///
 /// The line is short enough to be overwritten by any realistic `dbg!()` or panic output.
-fn print_bpm_input_line(input: &str, playing: bool) -> io::Result<()> {
+fn print_bpm_input_line(input: &str, playing: bool, progress: &PlaybackProgress) -> io::Result<()> {
+    let max_progress = progress.values().max().unwrap_or(&BeatNo::ONE);
+    let progress = format!("{max_progress:7}");
     execute!(
         io::stderr(),
         Clear(ClearType::CurrentLine),
         MoveToColumn(0),
         //BPM line
+        PrintStyledContent(progress.with(Color::White).attribute(Attribute::Bold)),
         PrintStyledContent(BPM_LABEL.with(Color::Yellow).attribute(Attribute::Bold)),
         PrintStyledContent(input.attribute(Attribute::Bold)),
         PrintStyledContent("▒".on(Color::DarkGrey).attribute(Attribute::RapidBlink)),
@@ -134,14 +139,17 @@ pub fn run_cli(opts: DrumkickOpts, track: Track) -> Result<(), Box<dyn std::erro
     let mut input = drumkick.bpm().to_string();
 
     print_help_line()?;
+    let mut maybe_terminal_event: Option<KeyEvent> = None;
     loop {
-        let maybe_terminal_event = read_key()?;
-
         for resp in drumkick.iter_resposes() {
             print_response(&resp)?;
         }
 
-        print_bpm_input_line(input.as_str(), drumkick.playing())?;
+        print_bpm_input_line(
+            input.as_str(),
+            drumkick.playing(),
+            &drumkick.playback_progress(),
+        )?;
 
         if let Some(event) = maybe_terminal_event {
             match (event.code, event.modifiers) {
@@ -154,11 +162,11 @@ pub fn run_cli(opts: DrumkickOpts, track: Track) -> Result<(), Box<dyn std::erro
                     break;
                 }
                 (Char('+') | Char('=') | KeyCode::Up, _) => {
-                    drumkick.set_bpm(drumkick.bpm() + 5.0)?;
+                    drumkick.set_bpm(drumkick.bpm() + 5.0);
                     overwrite_string(&mut input, drumkick.bpm())?;
                 }
                 (Char('-') | Char('_') | KeyCode::Down, _) => {
-                    drumkick.set_bpm(drumkick.bpm() - 5.0)?;
+                    drumkick.set_bpm(drumkick.bpm() - 5.0);
                     overwrite_string(&mut input, drumkick.bpm())?;
                 }
                 (Char(ch @ '0'..='9') | Char(ch @ '.'), _) => {
@@ -169,7 +177,7 @@ pub fn run_cli(opts: DrumkickOpts, track: Track) -> Result<(), Box<dyn std::erro
                 }
                 (KeyCode::Enter, _) => match parsing::parse_bpm(&input) {
                     Ok(new_bpm) => {
-                        drumkick.set_bpm(new_bpm)?;
+                        drumkick.set_bpm(new_bpm);
                         overwrite_string(&mut input, drumkick.bpm())?;
                         clear_line()?;
                     }
@@ -188,6 +196,7 @@ pub fn run_cli(opts: DrumkickOpts, track: Track) -> Result<(), Box<dyn std::erro
                 }
             }
         }
+        maybe_terminal_event = read_key()?;
     }
 
     clean_up_terminal()?;

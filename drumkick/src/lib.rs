@@ -1,8 +1,11 @@
 use cpal::{Stream, traits::StreamTrait};
+use indexmap::IndexMap;
 pub use pest::set_error_detail as pest_set_error_detail;
+use std::cell::RefCell;
 use std::fmt;
-use std::sync::mpsc::{Receiver, SendError, SyncSender, TryIter, sync_channel};
+use std::sync::mpsc::{Receiver, TryIter, sync_channel};
 
+use std::sync::Arc;
 use std::time::Duration;
 mod backend;
 pub mod embedded_samples;
@@ -10,9 +13,12 @@ pub mod measure_grammar;
 pub mod samples;
 pub mod sequence;
 pub use backend::machine::{
-    BUFFER_SIZE, Command, MAX_BPM, MIN_BPM, Response, ResponseLevel, Sequence,
+    BUFFER_SIZE, MAX_BPM, MIN_BPM, PlaybackProgress, Response, ResponseLevel, Sequence,
 };
+pub use backend::sound::LoadedSource;
+
 use backend::{machine, sound};
+pub use sequence::{BeatFraction, BeatNo};
 
 pub struct DrumkickOpts {
     pub buffer_size: u32,
@@ -39,63 +45,114 @@ pub struct Beat {
 #[derive(Debug, Clone)]
 pub struct Track {
     pub bpm: f64,
+    pub samples: IndexMap<String, Arc<sound::LoadedSource>>,
+    pub measure_beats: Vec<measure_grammar::BeatSpec>,
     pub sequence: Sequence,
 }
 
 /// The metronome/drum machine handle, controlling the real machine living in the audio thread
 pub struct MachineHandle {
     resp_receiver: Receiver<Response>,
-    cmd_sender: SyncSender<Command>,
+    target_state_params: machine::TargetStateParams,
+    target_state_publisher: machine::TargetStatePublisher,
+    // RefCell to allow pulling most recent state from non-mut methods.
+    playback_state_receiver: RefCell<machine::PlaybackStateReceiver>,
+    last_playback_state: RefCell<machine::PlaybackState>,
     stream: Stream,
-    playing: bool,
-    track: Track,
 }
 
 impl MachineHandle {
     pub fn new(opts: DrumkickOpts, track: Track) -> Result<Self, Box<dyn std::error::Error>> {
-        let (cmd_sender, cmd_receiver) = sync_channel(opts.message_buffer_size);
         let (resp_sender, resp_receiver) = sync_channel(opts.message_buffer_size);
+        let (device, stream_config, sample_format) =
+            machine::configure_backend(None, opts.buffer_size)?;
 
-        let stream = machine::configure_backend(None, opts.buffer_size, cmd_receiver, resp_sender)?;
-        let mut backend = MachineHandle {
-            stream,
+        let initial_sequences =
+            IndexMap::from([(0u64, machine::PlayingSequence::new(track.sequence.clone()))]);
+
+        let (playback_state_publisher, playback_state_receiver) =
+            Self::build_playback_state_buffer(initial_sequences.len());
+
+        let target_state_params = machine::TargetStateParams {
+            bpm: track.bpm,
+            sequences: initial_sequences,
             playing: false,
-            track: track.clone(),
-            resp_receiver,
-            cmd_sender,
         };
-        backend.set_bpm(track.bpm)?;
-        backend.set_sequence(0, Some(track.sequence))?;
+        let initial_state = machine::TargetState {
+            playback_publisher: playback_state_publisher,
+            params: target_state_params.clone(),
+        };
+        let (target_state_publisher, target_state_receiver) =
+            triple_buffer::TripleBuffer::default().split();
 
-        Ok(backend)
+        let machine = machine::Machine::new(
+            initial_state,
+            target_state_receiver,
+            stream_config,
+            resp_sender,
+        );
+        let stream = machine::build_output_stream(&device, sample_format, stream_config, machine)?;
+
+        Ok(MachineHandle {
+            stream,
+            target_state_params,
+            target_state_publisher,
+            playback_state_receiver: RefCell::new(playback_state_receiver),
+            last_playback_state: RefCell::new(machine::PlaybackState::default()),
+            resp_receiver,
+        })
     }
 
     pub fn playing(&self) -> bool {
-        self.playing
+        self.target_state_params.playing
     }
 
     pub fn bpm(&self) -> f64 {
-        self.track.bpm
+        self.target_state_params.bpm
     }
 
-    pub fn set_sequence(
-        &mut self,
-        seq_id: u64,
-        seq: Option<Sequence>,
-    ) -> Result<(), SendError<Command>> {
-        self.cmd_sender.send(Command::SetSequence(seq_id, seq))
+    fn build_playback_state_buffer(
+        sequences_cap: usize,
+    ) -> (
+        machine::PlaybackStatePublisher,
+        machine::PlaybackStateReceiver,
+    ) {
+        triple_buffer::triple_buffer(&machine::PlaybackState::with_capacity(sequences_cap))
+    }
+
+    fn publish_target_state(&mut self) {
+        let (playback_state_publisher, playback_state_receiver) =
+            Self::build_playback_state_buffer(self.target_state_params.sequences.len());
+
+        self.playback_state_receiver
+            .replace(playback_state_receiver);
+
+        self.target_state_publisher
+            .write(Some(machine::TargetState {
+                playback_publisher: playback_state_publisher,
+                params: self.target_state_params.clone(),
+            }));
+    }
+
+    pub fn set_sequences<'a>(&mut self, sequences: impl Iterator<Item = (u64, &'a Sequence)>) {
+        let playing_sequences: machine::PlayingSequenceMap = sequences
+            .map(|(k, seq)| (k, machine::PlayingSequence::new(seq.clone())))
+            .collect();
+
+        self.target_state_params.sequences = playing_sequences;
+        self.publish_target_state()
     }
 
     pub fn stop(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        self.playing = false;
-        self.cmd_sender.send(Command::Pause)?;
+        self.target_state_params.playing = false;
+        self.publish_target_state();
         self.stream.stop(Some(Duration::from_millis(50)))?;
         Ok(())
     }
 
     pub fn toggle_playing(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        if self.playing {
-            self.pause()?;
+        if self.target_state_params.playing {
+            self.pause();
         } else {
             self.play()?;
         }
@@ -103,26 +160,48 @@ impl MachineHandle {
     }
 
     pub fn play(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        self.playing = true;
+        self.target_state_params.playing = true;
         self.stream.start()?;
-        self.cmd_sender.send(Command::Play)?;
+        self.publish_target_state();
         Ok(())
     }
 
-    pub fn pause(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        self.playing = false;
-        self.cmd_sender.send(Command::Pause)?;
-        Ok(())
+    pub fn pause(&mut self) {
+        self.target_state_params.playing = false;
+        self.publish_target_state();
     }
 
-    pub fn set_bpm(&mut self, bpm: f64) -> Result<(), SendError<Command>> {
+    pub fn set_bpm(&mut self, bpm: f64) {
         let bpm = bpm.clamp(MIN_BPM, MAX_BPM);
-        self.track.bpm = bpm;
-        self.cmd_sender.send(Command::SetBPM(bpm))
+        self.target_state_params.bpm = bpm;
+        self.publish_target_state();
     }
 
     pub fn iter_resposes(&mut self) -> TryIter<'_, Response> {
         self.resp_receiver.try_iter()
+    }
+
+    pub fn playback_state(&self) -> machine::PlaybackState {
+        self.playback_state_receiver.borrow_mut().read().clone()
+    }
+
+    pub fn playback_progress(&self) -> machine::PlaybackProgress {
+        self.playback_state().progress
+    }
+
+    // Check if playback state value changed from the time `playback_state_updated` was last called.
+    pub fn playback_state_updated(&self) -> bool {
+        let this_playback_state = self.playback_state();
+
+        let updated = {
+            let last_playback_state = self.last_playback_state.borrow();
+            *last_playback_state != this_playback_state
+        };
+
+        self.last_playback_state
+            .replace(this_playback_state.clone());
+
+        updated
     }
 }
 

@@ -28,7 +28,7 @@ pub fn get_embedded_sample_names() -> Vec<&'static str> {
     EMBEDDED_SAMPLES
         .iter()
         .map(|(name, _)| name)
-        .cloned()
+        .copied()
         .collect()
 }
 
