@@ -62,6 +62,12 @@ impl BeatFraction {
     }
 }
 
+impl From<BeatFraction> for f64 {
+    fn from(value: BeatFraction) -> f64 {
+        f64::from(value.numerator) / f64::from(value.denominator.get())
+    }
+}
+
 impl fmt::Display for BeatFraction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         format!("{}/{}", self.numerator, self.denominator).fmt(f)
@@ -139,9 +145,7 @@ impl BeatNo {
 
     pub fn as_position(&self) -> f64 {
         let seconds = f64::from(self.beat.get() - 1);
-        let fraction =
-            f64::from(self.fraction.numerator) / f64::from(self.fraction.denominator.get());
-        seconds + fraction
+        seconds + f64::from(self.fraction)
     }
 }
 
@@ -188,6 +192,12 @@ mod test {
 
     fn one_and_one_second() -> BeatNo {
         BeatNo::new(1, 1, 2).unwrap()
+    }
+
+    #[rstest]
+    fn test_fraction_to_f64() {
+        assert_eq!(f64::from(BeatFraction::ONE_THIRD), 1.0 / 3.0);
+        assert_eq!(f64::from(BeatFraction::THREE_FOURTHS), 3.0 / 4.0);
     }
 
     #[rstest]

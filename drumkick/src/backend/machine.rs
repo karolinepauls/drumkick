@@ -1,4 +1,7 @@
-use crate::{backend::sound, sequence::BeatNo};
+use crate::{
+    backend::{counter, sound},
+    sequence::BeatNo,
+};
 use cpal::{
     BufferSize, CallbackInfo, Device, Error, ErrorKind, FromSample, I24, SampleFormat, SizedSample,
     Stream, StreamConfig, SupportedBufferSize,
@@ -176,41 +179,27 @@ impl Sequence {
 
 #[derive(Debug, Clone)]
 pub struct PlayingSequence {
-    position: f64,
-    last_beat: BeatNo,
-    started: bool,
+    last_beat_played: BeatNo,
     items: Vec<SequenceItem>,
 }
 
 impl PlayingSequence {
     pub fn new(sequence: Sequence) -> Self {
         Self {
-            position: 0.0,
-            last_beat: BeatNo::ONE,
-            started: false,
+            last_beat_played: BeatNo::ONE,
             items: sequence.items,
         }
     }
 
-    fn wraparound_position(&self) -> f64 {
-        self.items
-            .last()
-            .map(|i| i.beat_no.as_position().floor())
-            .unwrap_or(0.0)
-            + 1.0
+    fn beat_count(&self) -> u32 {
+        self.items.last().map(|i| i.beat_no.beat.get()).unwrap_or(1)
     }
 
-    fn get_with_wraparound(&self, index: usize) -> (&SequenceItem, bool) {
-        let index = index % self.items.len();
+    fn get_with_wraparound(&self, index: usize) -> (&SequenceItem, usize) {
+        let wraparounds = index / self.items.len();
+        let this_item = &self.items[index % self.items.len()];
 
-        let this_item = &self.items[index];
-        let is_new_measure = self.started && index == 0;
-
-        (this_item, is_new_measure)
-    }
-
-    fn mark_started(&mut self) {
-        self.started = true;
+        (this_item, wraparounds)
     }
 }
 
@@ -261,7 +250,7 @@ pub struct PlaybackState {
 pub type PlaybackStatePublisher = triple_buffer::Input<PlaybackState>;
 pub type PlaybackStateReceiver = triple_buffer::Output<PlaybackState>;
 
-/// State the machine is requested to achieve.
+/// State the machine is requested to take up.
 #[derive(Debug)]
 pub struct TargetState {
     /// PlaybackStatePublisher is a part of the target state since it needs to be preallocated to
@@ -295,6 +284,7 @@ impl PlaybackState {
 
 #[derive(Debug)]
 pub struct Machine {
+    beat_counter: counter::PlayedBeatCounter,
     state: TargetState,
     target_state_receiver: TargetStateReceiver,
 
@@ -307,6 +297,7 @@ pub struct Machine {
 }
 
 impl Machine {
+    // TODO: enforce the cap, dropping the oldest sounds.
     const PLAYING_CAP: usize = 512;
 
     pub fn new(
@@ -316,6 +307,7 @@ impl Machine {
         resp_sender: SyncSender<Response>,
     ) -> Self {
         Machine {
+            beat_counter: counter::PlayedBeatCounter::zero(),
             state,
             target_state_receiver,
             config,
@@ -345,6 +337,7 @@ impl Machine {
             data.len() as u64 / u64::from(self.config.channels) * 1_000_000_000
                 / u64::from(self.config.sample_rate),
         );
+        let buffer_duration_in_beats = buffer_duration.as_secs_f64() * beats_per_second;
 
         let buffer_start_time = self.time;
         let buffer_end_time = self.time + buffer_duration;
@@ -354,33 +347,40 @@ impl Machine {
         monitor_buffer.bpm = self.state.params.bpm;
         monitor_buffer.playing = self.state.params.playing;
 
-        if self.state.params.playing {
-            for (seq_id, sequence) in self.state.params.sequences.iter_mut() {
-                let buffer_start_position = sequence.position;
-                let buffer_end_position =
-                    buffer_start_position + buffer_duration.as_secs_f64() * beats_per_second;
+        let buf_start_beat_global = self.beat_counter;
+        let buf_end_beat_global = buf_start_beat_global + buffer_duration_in_beats;
 
-                // Bisect to find the first element to be scheduled.
-                let mut item_index = sequence
-                    .items
-                    .partition_point(|item| item.beat_no.as_position() < buffer_start_position);
+        for (seq_id, sequence) in self.state.params.sequences.iter_mut() {
+            if self.state.params.playing {
+                let sequence_start_diff =
+                    buf_start_beat_global.beats() % sequence.beat_count() as u64;
+                let sequence_start_beat = buf_start_beat_global.beats() - sequence_start_diff;
 
-                let mut wraparounds: f64 = 0.0;
+                let mut item_index = sequence.items.partition_point(|item| {
+                    is_beat_before_count(sequence_start_beat, item.beat_no, buf_start_beat_global)
+                });
+
                 loop {
-                    let (item, wrapped_around) = sequence.get_with_wraparound(item_index);
-                    wraparounds += f64::from(wrapped_around);
+                    let (item, wraparounds) = sequence.get_with_wraparound(item_index);
+                    // Current measures beat no, counted from the beginning.
+                    let item_beat_global = counter::PlayedBeatCounter::new(
+                        sequence_start_beat
+                            + u64::from(item.beat_no.beat().get() - 1)
+                            + wraparounds as u64 * u64::from(sequence.beat_count()),
+                        f64::from(item.beat_no.fraction),
+                    );
 
-                    let item_position =
-                        item.beat_no.as_position() + sequence.wraparound_position() * wraparounds;
-
-                    if item_position > buffer_end_position {
+                    if item_beat_global > buf_end_beat_global {
                         break;
                     }
 
-                    let item_position_in_buffer = (item_position - buffer_start_position)
-                        / (buffer_end_position - buffer_start_position);
+                    let item_position_in_buffer_in_beats =
+                        (item_beat_global.beats() - buf_start_beat_global.beats()) as f64
+                            + (item_beat_global.fraction() - buf_start_beat_global.fraction());
+                    let item_position_in_buffer_in_sec =
+                        item_position_in_buffer_in_beats / beats_per_second;
                     let item_start =
-                        buffer_start_time + buffer_duration.mul_f64(item_position_in_buffer);
+                        buffer_start_time + Duration::from_secs_f64(item_position_in_buffer_in_sec);
 
                     self.active_sounds.push(PlayingSound::new(
                         item_start,
@@ -389,16 +389,15 @@ impl Machine {
                     ));
 
                     item_index += 1;
-                    sequence.last_beat = item.beat_no;
-                    sequence.mark_started();
+                    sequence.last_beat_played = item.beat_no;
                 }
-
-                sequence.position = buffer_end_position;
-                while sequence.position > sequence.wraparound_position() {
-                    sequence.position -= sequence.wraparound_position();
-                }
-                monitor_buffer.progress.insert(*seq_id, sequence.last_beat);
             }
+            monitor_buffer
+                .progress
+                .insert(*seq_id, sequence.last_beat_played);
+        }
+        if self.state.params.playing {
+            self.beat_counter = buf_end_beat_global;
         }
 
         // Produce samples for playing sounds
@@ -436,15 +435,13 @@ impl Machine {
         self.target_state_receiver.update();
         // mem::take will leave None in the buffer, meaning that output_buffer_mut() will remain
         // None until the next update.
-        // .
         if let Some(mut new_state) = mem::take(self.target_state_receiver.output_buffer_mut()) {
             new_state.params.bpm = new_state.params.bpm.clamp(MIN_BPM, MAX_BPM);
 
             // Update new state with progress from current sequences
             for (id, new_seq) in new_state.params.sequences.iter_mut() {
                 if let Some(seq) = self.state.params.sequences.get(id) {
-                    new_seq.position = seq.position;
-                    new_seq.started = seq.started;
+                    new_seq.last_beat_played = seq.last_beat_played;
                 }
             }
 
@@ -455,4 +452,16 @@ impl Machine {
             ));
         }
     }
+}
+
+fn is_beat_before_count(
+    sequence_start_beat: u64,
+    beat_no: BeatNo,
+    beat_counter: counter::PlayedBeatCounter,
+) -> bool {
+    let beat_no_as_global_counter = counter::PlayedBeatCounter::new(
+        sequence_start_beat + u64::from(beat_no.beat().get() - 1),
+        f64::from(beat_no.fraction),
+    );
+    beat_no_as_global_counter < beat_counter
 }

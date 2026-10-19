@@ -50,7 +50,7 @@ fn load_embedded_sample(name: &str) -> Result<Option<Arc<sound::LoadedSource>>, 
         .transpose()
 }
 
-pub fn load_samples<'a>(
+pub fn load_samples(
     sample_locations: &IndexMap<&str, &str>,
 ) -> Result<IndexMap<String, Arc<sound::LoadedSource>>, SampleLoadingErrors> {
     let mut name_to_sample: IndexMap<String, Arc<sound::LoadedSource>> = IndexMap::new();
