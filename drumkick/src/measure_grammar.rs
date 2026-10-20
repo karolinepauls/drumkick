@@ -1,4 +1,4 @@
-use crate::sequence::{BeatFraction, BeatNo};
+use crate::beat::{BeatFraction, BeatNo};
 use pest::Parser as PestParser;
 use pest::error::Error as PestError;
 use pest::iterators::Pair;

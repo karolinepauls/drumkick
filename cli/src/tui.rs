@@ -24,7 +24,7 @@ use std::io;
 use std::time;
 
 use drumkick::{
-    DrumkickOpts, LoadedSource, MachineHandle, Response, ResponseLevel, Sequence, Track,
+    DrumkickOpts, InitialState, LoadedSource, MachineHandle, Response, ResponseLevel, Sequence,
     measure_grammar::{BeatSpec, MeasureParseError, ToSource as _, parse_measure},
     samples,
 };
@@ -356,7 +356,10 @@ pub struct App<'certainly_something, 's> {
 }
 
 impl App<'_, '_> {
-    pub fn new(opts: DrumkickOpts, track: Track) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(
+        opts: DrumkickOpts,
+        track: InitialState,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let drumkick = MachineHandle::new(opts, track.clone())?;
         let input = BPMInput::new(drumkick.bpm());
         let mut app = Self {
@@ -380,8 +383,6 @@ impl App<'_, '_> {
         &mut self,
         terminal: &mut DefaultTerminal,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        //self.drumkick.play()?;
-
         while !self.exit {
             self.propagate();
             terminal.draw(|frame| self.draw(frame))?;
@@ -864,7 +865,7 @@ impl App<'_, '_> {
     }
 }
 
-pub fn run_tui(opts: DrumkickOpts, track: Track) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run_tui(opts: DrumkickOpts, track: InitialState) -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App::new(opts, track)?;
     ratatui::run(|terminal| app.run(terminal))
 }

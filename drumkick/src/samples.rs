@@ -4,10 +4,10 @@ use symphonia::core::errors::Error as SymphoniaError;
 use thiserror::Error;
 
 use crate::{
-    backend::machine::{Sequence, SequenceItem},
     backend::sound,
     embedded_samples::{get_embedded_sample, get_embedded_sample_names},
     measure_grammar::{BeatSpec, backtick_quote, join_backtick_quoted},
+    sequence::{Sequence, SequenceItem},
 };
 
 #[derive(Error, Debug)]
@@ -127,7 +127,7 @@ mod test {
     use indexmap::IndexSet;
     use rstest::*;
 
-    use crate::sequence::BeatNo;
+    use crate::beat::BeatNo;
 
     fn sound_samples_to_bytes(samples: &Vec<f32>) -> Vec<u8> {
         samples

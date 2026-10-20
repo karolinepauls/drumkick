@@ -16,7 +16,7 @@ use std::io;
 use std::time;
 
 use drumkick::{
-    BeatNo, DrumkickOpts, MachineHandle, PlaybackProgress, Response, ResponseLevel, Track,
+    BeatNo, DrumkickOpts, InitialState, MachineHandle, PlaybackProgress, Response, ResponseLevel,
 };
 
 use std::panic;
@@ -123,7 +123,7 @@ fn print_help_line() -> io::Result<()> {
     )
 }
 
-pub fn run_cli(opts: DrumkickOpts, track: Track) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run_cli(opts: DrumkickOpts, track: InitialState) -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
     term::enable_output_postprocessing()?;
     execute!(io::stderr(), Hide)?;

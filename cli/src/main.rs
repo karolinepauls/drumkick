@@ -10,7 +10,7 @@ use std::fmt;
 use thiserror::Error;
 
 use drumkick::{
-    BUFFER_SIZE, DrumkickOpts, Track,
+    BUFFER_SIZE, DrumkickOpts, InitialState,
     embedded_samples::{EMBEDDED_SAMPLE_NAMES, get_embedded_sample_names},
     measure_grammar::{BEAT_FRACTIONS, BeatSpec, MeasureParseError, backtick_quote, parse_measure},
     pest_set_error_detail, samples,
@@ -129,7 +129,7 @@ fn unwrap_or_terminate<T, E: fmt::Display>(r: Result<T, E>, error_code: i32) -> 
     }
 }
 
-fn init() -> Result<(Args, DrumkickOpts, Track), Box<dyn std::error::Error>> {
+fn init() -> Result<(Args, DrumkickOpts, InitialState), Box<dyn std::error::Error>> {
     let args = Args::parse();
     pest_set_error_detail(true);
 
@@ -151,7 +151,7 @@ fn init() -> Result<(Args, DrumkickOpts, Track), Box<dyn std::error::Error>> {
         sound_capacity: 512,
         message_buffer_size: 32,
     };
-    let track = Track {
+    let track = InitialState {
         bpm: track_spec.bpm,
         samples,
         measure_beats: track_spec.measure_beats,
