@@ -174,7 +174,11 @@ impl<'a> Widget for &BPMInput<'a> {
     fn render(self, rect: Rect, buffer: &mut Buffer) {
         let side_padding = 2;
 
-        let label_text = Text::from(if self.focused { "New BPM: " } else { "BPM: " });
+        let label_text = Text::from(if self.focused {
+            Span::from("New BPM: ").white()
+        } else {
+            Span::from("BPM: ")
+        });
         let label_text_width = label_text.width() as u16;
         let bpm_label = Paragraph::new(label_text).right_aligned();
 
@@ -570,16 +574,50 @@ impl App<'_, '_> {
         }
     }
 
+    fn context_info(&self) -> Option<Line<'_>> {
+        if let AppFocus::Measure(_) = self.focus() {
+            let mut line = Line::default();
+            line.push_span(Span::from("Available samples: "));
+
+            for sample_name in
+                samples::all_available_sample_names(self.samples.keys().map(String::as_str))
+            {
+                line.push_span(Span::from(sample_name).light_magenta());
+                line.push_span(Span::from(", ").white());
+            }
+            if line.spans.len() > 1 {
+                line.spans.pop();
+                line.push_span(Span::from(".").white());
+            }
+
+            Some(line)
+        } else {
+            None
+        }
+    }
+
     fn draw_info(&self, frame: &mut Frame, rect: Rect) {
         let lines_available = usize::from(rect.height).saturating_sub(2);
 
-        let mut error_text = Text::from(self.error.as_deref().unwrap_or("")).red();
+        let mut info_text = Text::default();
+
+        if let Some(context_line) = self.context_info() {
+            info_text.push_line(context_line.centered());
+        }
+
+        if let Some(ref error) = self.error {
+            info_text.push_line(Line::default());
+            for line in error.lines() {
+                info_text.push_line(Line::from(line).light_red());
+            }
+        }
+
         for msg in self
             .debug_messages
             .iter()
             .skip(self.debug_messages.len().saturating_sub(lines_available))
         {
-            error_text.push_line(Line::from(msg.clone().dark_gray()));
+            info_text.push_line(Line::from(msg.clone().dark_gray()));
         }
 
         let debug_block = Block::new()
@@ -591,14 +629,14 @@ impl App<'_, '_> {
             .direction(Direction::Horizontal)
             .constraints(vec![
                 Constraint::Fill(1),
-                Constraint::Max(error_text.width() as u16),
+                Constraint::Max(info_text.width() as u16),
                 Constraint::Fill(1),
             ])
             .split(debug_block.inner(rect));
 
         frame.render_widget(debug_block, rect);
         frame.render_widget(
-            Paragraph::new(error_text).block(Block::new()),
+            Paragraph::new(info_text).block(Block::new()),
             debug_layout[1],
         );
     }
@@ -715,7 +753,10 @@ impl App<'_, '_> {
                         self.focus.push(AppFocus::Measure(measure_index));
                     }
                 },
-                (Char('a'), _) => self.add_measure(String::from("1:"), None),
+                (Char('a'), _) => {
+                    let measure_index = self.add_measure(String::from("1:"), None);
+                    self.focus.push(AppFocus::Measure(measure_index));
+                }
                 (Char('x'), _) => {
                     if let AppFocus::Measure(measure_index) = self.selection {
                         self.delete_measure(measure_index);
@@ -745,7 +786,8 @@ impl App<'_, '_> {
     }
 
     fn handle_measure_input_key_event(&mut self, index: usize, event: Event) {
-        let sample_names: Vec<_> = self.samples.keys().map(|k| k.as_str()).collect();
+        let sample_names: Vec<_> =
+            samples::all_available_sample_names(self.samples.keys().map(String::as_str)).collect();
 
         let measure = self.measures.get_mut(index).expect("old_measure");
         let effect = measure.input.handle_event(event, &sample_names);
@@ -833,7 +875,7 @@ impl App<'_, '_> {
         self.selection = new_active_measure;
     }
 
-    fn add_measure(&mut self, source: String, sequence: Option<Sequence>) {
+    fn add_measure(&mut self, source: String, sequence: Option<Sequence>) -> usize {
         self.measures.push(Measure {
             id: self.next_measure_id,
             input: MeasureInput::new(&source),
@@ -843,6 +885,8 @@ impl App<'_, '_> {
         self.selection = AppFocus::Measure(self.measures.len() - 1);
         self.next_measure_id += 1;
         self.update_sequences();
+
+        self.measures.len() - 1
     }
 
     fn delete_measure(&mut self, index: usize) {

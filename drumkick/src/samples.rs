@@ -50,6 +50,14 @@ fn load_embedded_sample(name: &str) -> Result<Option<Arc<sound::LoadedSource>>, 
         .transpose()
 }
 
+pub fn all_available_sample_names<'a>(
+    user_sample_names: impl IntoIterator<Item = &'a str>,
+) -> impl Iterator<Item = &'a str> {
+    user_sample_names
+        .into_iter()
+        .chain(get_embedded_sample_names())
+}
+
 pub fn load_samples(
     sample_locations: &IndexMap<&str, &str>,
 ) -> Result<IndexMap<String, Arc<sound::LoadedSource>>, SampleLoadingErrors> {
@@ -110,11 +118,11 @@ pub fn load_samples_into_sequence(
     if !missing_samples.is_empty() {
         return Err(MissingSamples {
             missing_samples,
-            available_samples: name_to_sample
-                .keys()
-                .cloned()
-                .chain(get_embedded_sample_names().into_iter().map(String::from))
-                .collect(),
+            available_samples: all_available_sample_names(
+                name_to_sample.keys().map(String::as_str),
+            )
+            .map(String::from)
+            .collect(),
         });
     }
 
