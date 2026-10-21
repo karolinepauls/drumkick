@@ -232,6 +232,7 @@ impl<'a> Widget for &BPMInput<'a> {
 #[derive(Debug)]
 pub struct MeasureInput<'certainly_something> {
     input: TextArea<'certainly_something>,
+    block: Block<'certainly_something>,
 }
 /// A copy-paste of BPMInput but don't worry - they will diverge as features are added.
 impl MeasureInput<'_> {
@@ -247,7 +248,10 @@ impl MeasureInput<'_> {
         textarea.set_block(Block::new().padding(Padding::uniform(MEASURE_PADDING)));
         textarea.set_wrap_mode(WrapMode::Word);
 
-        let mut input = Self { input: textarea };
+        let mut input = Self {
+            input: textarea,
+            block: Block::default().borders(Borders::ALL),
+        };
         input.set_selected(false);
         input
     }
@@ -293,19 +297,31 @@ impl MeasureInput<'_> {
         InputEditEffect::Editing
     }
 
+    fn set_muted(&mut self, selected: bool) {
+        match selected {
+            true => {
+                self.block = self.block.clone().border_set(border::LIGHT_DOUBLE_DASHED);
+            }
+            false => {
+                self.block = self.block.clone().border_set(border::PLAIN);
+            }
+        }
+        self.input.set_block(self.block.clone());
+    }
+
     fn set_selected(&mut self, selected: bool) {
         match selected {
-            true => self.input.set_block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(active_style()),
-            ),
-            false => self.input.set_block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().dark_gray()),
-            ),
+            true => {
+                self.block = self.block.clone().border_style(active_style());
+            }
+            false => {
+                self.block = self
+                    .block
+                    .clone()
+                    .border_style(Style::default().dark_gray())
+            }
         }
+        self.input.set_block(self.block.clone());
     }
 
     /// Change appearance based on focus.
@@ -325,11 +341,11 @@ impl<'a> Widget for &MeasureInput<'a> {
 }
 
 #[derive(Debug)]
-struct Measure<'s> {
+struct Measure<'i> {
     id: u64,
     source: String,
-    input: MeasureInput<'s>,
-    sequence: Option<Sequence>,
+    input: MeasureInput<'i>,
+    sequence: Sequence,
 }
 
 #[derive(Debug)]
@@ -356,19 +372,19 @@ struct AppLayout {
 }
 
 #[derive(Debug)]
-pub struct App<'certainly_something, 's> {
+pub struct App<'bpm, 'measure> {
     drumkick: MachineHandle,
     exit: bool,
     scroll_offset: u16,
     error: Option<String>,
     debug_messages: VecDeque<String>,
-    bpm_input: BPMInput<'certainly_something>,
+    bpm_input: BPMInput<'bpm>,
     /// Menu navigation
     selection: AppFocus,
     /// Input focus
     focus: Vec<AppFocus>,
     next_measure_id: u64,
-    measures: Vec<Measure<'s>>,
+    measures: Vec<Measure<'measure>>,
     samples: IndexMap<String, Arc<LoadedSource>>,
 }
 
@@ -432,6 +448,7 @@ impl App<'_, '_> {
         for measure in self.measures.iter_mut() {
             measure.input.set_focused(false);
             measure.input.set_selected(false);
+            measure.input.set_muted(measure.sequence.muted);
         }
 
         // Mark selected measure (unless editing BPM)
@@ -755,7 +772,23 @@ impl App<'_, '_> {
             ]);
         }
 
-        if self.focus() == AppFocus::App && matches!(self.selection, AppFocus::Measure(_)) {
+        if self.focus() == AppFocus::App
+            && let AppFocus::Measure(n) = self.selection
+        {
+            let measure = &self.measures[n];
+
+            line_elements.append(&mut vec![
+                "  ".into(),
+                "M".bold(),
+                ": ".into(),
+                if measure.sequence.muted {
+                    "Unmute measure"
+                } else {
+                    "Mute measure"
+                }
+                .into(),
+            ]);
+
             line_elements.append(&mut vec![
                 "  ".into(),
                 "X".bold(),
@@ -852,6 +885,11 @@ impl App<'_, '_> {
                         self.delete_measure(measure_index);
                     }
                 }
+                (Char('m'), _) => {
+                    if let AppFocus::Measure(measure_index) = self.selection {
+                        self.mute_unmute_measure(measure_index);
+                    }
+                }
                 _ => {}
             };
         }
@@ -889,11 +927,11 @@ impl App<'_, '_> {
                 self.focus.pop();
             }
             InputEditEffect::Applied((source, beat_specs)) => {
-                match samples::load_samples_into_sequence(&beat_specs, &self.samples) {
+                match samples::arrange_samples_into_sequence_items(&beat_specs, &self.samples) {
                     Err(err) => self.set_error(err),
-                    Ok(sequence) => {
+                    Ok(items) => {
                         measure.source = source;
-                        measure.sequence = Some(sequence);
+                        measure.sequence.items = items;
                         self.update_sequences();
                         self.clear_error();
                         self.focus.pop();
@@ -970,7 +1008,7 @@ impl App<'_, '_> {
             id: self.next_measure_id,
             input: MeasureInput::new(&source),
             source,
-            sequence,
+            sequence: sequence.unwrap_or_else(|| Sequence::new([])),
         });
         self.selection = AppFocus::Measure(self.measures.len() - 1);
         self.next_measure_id += 1;
@@ -990,11 +1028,18 @@ impl App<'_, '_> {
         self.update_sequences();
     }
 
+    fn mute_unmute_measure(&mut self, index: usize) {
+        let measure = &mut self.measures[index];
+        measure.sequence.muted = !measure.sequence.muted;
+        self.update_sequences();
+    }
+
     fn update_sequences(&mut self) {
         self.drumkick.set_sequences(
             self.measures
                 .iter()
-                .filter_map(|m| m.sequence.as_ref().map(|s| (m.id, s))),
+                .filter(|m| !m.sequence.items.is_empty())
+                .map(|m| (m.id, &m.sequence)),
         );
     }
 }

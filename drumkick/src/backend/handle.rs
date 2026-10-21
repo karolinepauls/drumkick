@@ -57,7 +57,7 @@ impl MachineHandle {
             machine::configure_backend(None, opts.buffer_size)?;
 
         let initial_sequences =
-            IndexMap::from([(0u64, machine::PlayingSequence::new(track.sequence.clone()))]);
+            IndexMap::from([(0u64, machine::MachineSequence::new(track.sequence.clone()))]);
 
         let (playback_state_publisher, playback_state_receiver) =
             Self::build_playback_state_buffer(initial_sequences.len());
@@ -125,7 +125,7 @@ impl MachineHandle {
 
     pub fn set_sequences<'a>(&mut self, sequences: impl Iterator<Item = (u64, &'a Sequence)>) {
         let playing_sequences: machine::PlayingSequenceMap = sequences
-            .map(|(k, seq)| (k, machine::PlayingSequence::new(seq.clone())))
+            .map(|(k, seq)| (k, machine::MachineSequence::new(seq.clone())))
             .collect();
 
         self.target_state_params.sequences = playing_sequences;

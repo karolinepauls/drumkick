@@ -14,11 +14,13 @@ impl SequenceItem {
 
 #[derive(Debug, Clone)]
 pub struct Sequence {
+    pub muted: bool,
     pub items: Vec<SequenceItem>,
 }
 impl Sequence {
     pub fn new(items: impl IntoIterator<Item = SequenceItem>) -> Self {
         Self {
+            muted: false,
             items: items.into_iter().collect(),
         }
     }

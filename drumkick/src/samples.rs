@@ -90,10 +90,10 @@ pub fn load_samples(
     Ok(name_to_sample)
 }
 
-pub fn load_samples_into_sequence(
+pub fn arrange_samples_into_sequence_items(
     beats: &[BeatSpec],
     name_to_sample: &IndexMap<String, Arc<sound::LoadedSource>>,
-) -> Result<Sequence, MissingSamples> {
+) -> Result<Vec<SequenceItem>, MissingSamples> {
     let mut items = Vec::new();
     let mut missing_samples = Vec::new();
 
@@ -126,7 +126,15 @@ pub fn load_samples_into_sequence(
         });
     }
 
-    Ok(Sequence::new(items))
+    Ok(items)
+}
+
+pub fn load_samples_into_sequence(
+    beats: &[BeatSpec],
+    name_to_sample: &IndexMap<String, Arc<sound::LoadedSource>>,
+) -> Result<Sequence, MissingSamples> {
+    let samples = arrange_samples_into_sequence_items(beats, name_to_sample)?;
+    Ok(Sequence::new(samples))
 }
 
 #[cfg(test)]

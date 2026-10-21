@@ -149,16 +149,18 @@ impl Ord for PlayingSound {
 }
 
 #[derive(Debug, Clone)]
-pub struct PlayingSequence {
-    last_beat_played: BeatNo,
+pub struct MachineSequence {
+    muted: bool,
     items: Vec<SequenceItem>,
+    last_beat_played: BeatNo,
 }
 
-impl PlayingSequence {
+impl MachineSequence {
     pub fn new(sequence: Sequence) -> Self {
         Self {
-            last_beat_played: BeatNo::ONE,
+            muted: sequence.muted,
             items: sequence.items,
+            last_beat_played: BeatNo::ONE,
         }
     }
 
@@ -207,7 +209,7 @@ impl SendResp for SyncSender<Response> {
     }
 }
 
-pub type PlayingSequenceMap = IndexMap<u64, PlayingSequence>;
+pub type PlayingSequenceMap = IndexMap<u64, MachineSequence>;
 pub type PlaybackProgress = IndexMap<u64, BeatNo>;
 
 /// Playback state, including sequence progress and applied params.
@@ -345,19 +347,21 @@ impl Machine {
                         break;
                     }
 
-                    let item_position_in_buffer_in_beats =
-                        (item_beat_global.beats() - buf_start_beat_global.beats()) as f64
-                            + (item_beat_global.fraction() - buf_start_beat_global.fraction());
-                    let item_position_in_buffer_in_sec =
-                        item_position_in_buffer_in_beats / beats_per_second;
-                    let item_start =
-                        buffer_start_time + Duration::from_secs_f64(item_position_in_buffer_in_sec);
+                    if !sequence.muted {
+                        let item_position_in_buffer_in_beats =
+                            (item_beat_global.beats() - buf_start_beat_global.beats()) as f64
+                                + (item_beat_global.fraction() - buf_start_beat_global.fraction());
+                        let item_position_in_buffer_in_sec =
+                            item_position_in_buffer_in_beats / beats_per_second;
+                        let item_start = buffer_start_time
+                            + Duration::from_secs_f64(item_position_in_buffer_in_sec);
 
-                    self.active_sounds.push(PlayingSound::new(
-                        item_start,
-                        &item.source,
-                        self.config.sample_rate,
-                    ));
+                        self.active_sounds.push(PlayingSound::new(
+                            item_start,
+                            &item.source,
+                            self.config.sample_rate,
+                        ));
+                    }
 
                     item_index += 1;
                     sequence.last_beat_played = item.beat_no;
