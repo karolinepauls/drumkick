@@ -1007,6 +1007,7 @@ impl App<'_, '_> {
         let new_active_measure = match new_active_measure_shifted {
             0 => AppFocus::BPMInput,
             1 => AppFocus::App,
+            _ if self.measures.is_empty() => AppFocus::App,
             n => {
                 let max_bound = self.measures.len() - 1;
                 let index = (n - 2).min(max_bound);
