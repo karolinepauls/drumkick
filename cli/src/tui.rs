@@ -14,11 +14,11 @@ use std::sync::Arc;
 use ratatui::{
     DefaultTerminal, Frame,
     buffer::Buffer,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Rect, Size},
     style::{Color, Style, Stylize},
     symbols::border,
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Padding, Paragraph, Widget},
+    widgets::{Block, Borders, Padding, Paragraph, Scrollbar, ScrollbarState, Widget},
 };
 use std::io;
 use std::time;
@@ -31,6 +31,9 @@ use drumkick::{
 
 const UI_POLL_DURATION: time::Duration = time::Duration::from_millis(50);
 const DEBUG_MESSAGES_CAPACITY: usize = 20;
+const MEASURES_BLOCK_PADDING: u16 = 1;
+const MEASURE_PADDING: u16 = 1;
+const MEASURE_HEIGHT: u16 = 3;
 
 fn get_input_text<'a>(input: &'a TextArea) -> &'a str {
     input.lines().first().map(String::as_str).unwrap_or("")
@@ -241,7 +244,7 @@ impl MeasureInput<'_> {
         textarea.set_cursor_line_style(cursor_line_style());
         textarea.set_cursor_style(hidden_cursor_style());
 
-        textarea.set_block(Block::new().padding(Padding::uniform(1)));
+        textarea.set_block(Block::new().padding(Padding::uniform(MEASURE_PADDING)));
         textarea.set_wrap_mode(WrapMode::Word);
 
         let mut input = Self { input: textarea };
@@ -343,10 +346,20 @@ enum AppFocus {
     Measure(usize),
 }
 
+#[derive(Debug, Clone)]
+struct AppLayout {
+    outer_rect: Rect,
+    bpm_rect: Rect,
+    measures_rect: Rect,
+    info_rect: Rect,
+    action_rect: Rect,
+}
+
 #[derive(Debug)]
 pub struct App<'certainly_something, 's> {
     drumkick: MachineHandle,
     exit: bool,
+    scroll_offset: u16,
     error: Option<String>,
     debug_messages: VecDeque<String>,
     bpm_input: BPMInput<'certainly_something>,
@@ -369,6 +382,7 @@ impl App<'_, '_> {
         let mut app = Self {
             drumkick,
             exit: false,
+            scroll_offset: 0,
             error: None,
             debug_messages: VecDeque::new(),
             bpm_input: input,
@@ -389,6 +403,7 @@ impl App<'_, '_> {
     ) -> Result<(), Box<dyn std::error::Error>> {
         while !self.exit {
             self.propagate();
+            self.adjust_scroll_offset_for_selection(terminal.size()?);
             terminal.draw(|frame| self.draw(frame))?;
 
             let mut event_received = false;
@@ -447,6 +462,29 @@ impl App<'_, '_> {
         }
     }
 
+    fn adjust_scroll_offset_for_selection(&mut self, size: Size) {
+        if let AppFocus::Measure(index) = self.selection {
+            let (AppLayout { measures_rect, .. }, _) =
+                Self::app_level_layout(Rect::new(0, 0, size.width, size.height));
+
+            let useful_height = measures_rect
+                .height
+                .saturating_sub(MEASURES_BLOCK_PADDING * 2)
+                .saturating_sub(1); // top border
+            let selected_item_top = (index as u16).saturating_mul(MEASURE_HEIGHT);
+            let selected_item_bottom = selected_item_top.saturating_add(MEASURE_HEIGHT);
+
+            let display_top = self.scroll_offset;
+            let display_bottom = self.scroll_offset.saturating_add(useful_height);
+
+            if selected_item_bottom > display_bottom {
+                self.scroll_offset = selected_item_bottom.saturating_sub(useful_height);
+            } else if selected_item_top < display_top {
+                self.scroll_offset = selected_item_top;
+            }
+        }
+    }
+
     fn general_instructions(&self) -> Line<'_> {
         let mut instructions: Vec<Span> = vec![" ".into()];
 
@@ -471,9 +509,9 @@ impl App<'_, '_> {
         Line::from(instructions)
     }
 
-    fn draw(&self, frame: &mut Frame) {
-        let Rect { width, height, .. } = frame.area();
-        let area = frame.area().centered(
+    fn app_level_layout<'a>(frame_rect: Rect) -> (AppLayout, Block<'a>) {
+        let Rect { width, height, .. } = frame_rect;
+        let area = frame_rect.centered(
             if width > 100 {
                 Constraint::Percentage(80)
             } else {
@@ -491,24 +529,8 @@ impl App<'_, '_> {
             .constraints(vec![Constraint::Min(1)])
             .split(outer_block.inner(area));
 
-        // Main block
-        let title = Line::from(vec![
-            " drumkick".bold(),
-            " - ".into(),
-            (if self.drumkick.playing() {
-                "playing"
-            } else {
-                "paused"
-            })
-            .into(),
-            " ".into(),
-        ]);
-
-        let block = Block::bordered()
-            .padding(1.into())
-            .title(title.centered())
-            .title_bottom(self.general_instructions().centered())
-            .border_set(border::THICK);
+        // Main block, just dimensions
+        let block = Block::bordered().padding(1.into());
 
         // Layout in the main block
         let layout = Layout::default()
@@ -525,12 +547,47 @@ impl App<'_, '_> {
             ])
             .split(block.inner(area));
 
-        let bpm_rect = layout[0];
-        let measures_rect = layout[1];
-        let info_rect = layout[2];
-        let action_rect = layout[3];
+        (
+            AppLayout {
+                outer_rect: outer_layout[0],
+                bpm_rect: layout[0],
+                measures_rect: layout[1],
+                info_rect: layout[2],
+                action_rect: layout[3],
+            },
+            block,
+        )
+    }
 
-        frame.render_widget(block, outer_layout[0]);
+    fn draw(&self, frame: &mut Frame) {
+        let (
+            AppLayout {
+                outer_rect,
+                bpm_rect,
+                measures_rect,
+                info_rect,
+                action_rect,
+            },
+            block,
+        ) = Self::app_level_layout(frame.area());
+
+        // Draw main block
+        let title = Line::from(vec![
+            " drumkick".bold(),
+            " - ".into(),
+            (if self.drumkick.playing() {
+                "playing"
+            } else {
+                "paused"
+            })
+            .into(),
+            " ".into(),
+        ]);
+        let block = block
+            .title(title.centered())
+            .title_bottom(self.general_instructions().centered())
+            .border_set(border::THICK);
+        frame.render_widget(block, outer_rect);
 
         frame.render_widget(&self.bpm_input, bpm_rect);
         self.draw_measures(frame, measures_rect);
@@ -540,19 +597,39 @@ impl App<'_, '_> {
 
     fn draw_measures(&self, frame: &mut Frame, rect: Rect) {
         let block = Block::new()
-            .padding(1.into())
+            .padding(MEASURES_BLOCK_PADDING.into())
             .borders(Borders::TOP)
             .title("───Measures");
 
         frame.render_widget(&block, rect);
         let inner_rect = block.inner(rect);
 
-        let mut constraints = vec![Constraint::Max(3); self.measures.len()];
-        constraints.push(Constraint::Fill(1));
+        let measures_and_scrollbar_layout =
+            Layout::horizontal(vec![Constraint::Fill(1), Constraint::Length(1)]).split(inner_rect);
+        let measures_rect = measures_and_scrollbar_layout[0];
+        let scrollbar_rect = measures_and_scrollbar_layout[1];
+
+        let content_length = self.measures.len().saturating_mul(MEASURE_HEIGHT.into());
+
+        // Scrollbar
+        let mut scrollbar_state = ScrollbarState::new(
+            // Weird but needed to make the scrollbar act correctly. The content length passed into
+            // the scrollbar has to be "the length that doesn't fit".
+            content_length.saturating_sub(measures_rect.height.into()),
+        )
+        .position(self.scroll_offset.into())
+        .viewport_content_length(measures_rect.height.into());
+        frame.render_stateful_widget(Scrollbar::default(), scrollbar_rect, &mut scrollbar_state);
+
+        // Scrolled measure list
+        let scroll_buf_rect = Rect::new(0, 0, measures_rect.width, content_length as u16);
+        let mut scroll_buf = Buffer::empty(scroll_buf_rect);
+
+        let measure_list_constraints = vec![Constraint::Max(3); self.measures.len()];
         let measures_list_layout = Layout::default()
             .direction(Direction::Vertical)
-            .constraints(constraints)
-            .split(inner_rect);
+            .constraints(measure_list_constraints)
+            .split(scroll_buf_rect);
 
         let playback_progress = self.drumkick.playback_progress();
 
@@ -562,15 +639,28 @@ impl App<'_, '_> {
                 .constraints([Constraint::Fill(1), Constraint::Max(7)])
                 .split(measure_rect);
 
-            frame.render_widget(&measure.input, measure_layout[0]);
+            measure.input.render(measure_layout[0], &mut scroll_buf);
 
             let measure_progress = playback_progress
                 .get(&measure.id)
                 .map(ToString::to_string)
                 .unwrap_or_else(|| "…".to_string());
-            let measure_progress =
-                Paragraph::new(Text::from(measure_progress)).block(Block::new().padding(1.into()));
-            frame.render_widget(measure_progress, measure_layout[1]);
+            let measure_progress = Paragraph::new(Text::from(measure_progress))
+                .block(Block::new().padding(MEASURE_PADDING.into()));
+
+            measure_progress.render(measure_layout[1], &mut scroll_buf);
+        }
+
+        // Write the visible section of the scroll buffer into the visible content.
+        let visible_content = scroll_buf
+            .content
+            .into_iter()
+            .skip((measures_rect.width.saturating_mul(self.scroll_offset)) as usize)
+            .take(measures_rect.area() as usize);
+        for (i, cell) in visible_content.enumerate() {
+            let x = i as u16 % measures_rect.width;
+            let y = i as u16 / measures_rect.width;
+            frame.buffer_mut()[(measures_rect.x + x, measures_rect.y + y)] = cell;
         }
     }
 
