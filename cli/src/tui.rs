@@ -408,7 +408,11 @@ impl App<'_, '_> {
             measures: Vec::new(),
             samples: track.samples,
         };
-        app.add_measure(track.measure_beats.to_source(), Some(track.sequence));
+        app.add_measure(
+            app.measures.len(),
+            track.measure_beats.to_source(),
+            Some(track.sequence),
+        );
         app.selection = AppFocus::App;
         Ok(app)
     }
@@ -760,7 +764,7 @@ impl App<'_, '_> {
             (_, AppFocus::Measure(_)) => "Apply measure",
             (AppFocus::App, AppFocus::App) => "",
             (AppFocus::BPMInput, _) => "Edit BPM",
-            (AppFocus::Measure(_), _) => "Edit measure",
+            (AppFocus::Measure(_), _) => "Edit",
         };
 
         if !action_str.is_empty() {
@@ -782,18 +786,16 @@ impl App<'_, '_> {
                 "M".bold(),
                 ": ".into(),
                 if measure.sequence.muted {
-                    "Unmute measure"
+                    "Unmute"
                 } else {
-                    "Mute measure"
+                    "Mute"
                 }
                 .into(),
             ]);
 
-            line_elements.append(&mut vec![
-                "  ".into(),
-                "X".bold(),
-                ": Delete measure".into(),
-            ]);
+            line_elements.append(&mut vec!["  ".into(), "C".bold(), ": Clone".into()]);
+
+            line_elements.append(&mut vec!["  ".into(), "X".bold(), ": Delete".into()]);
         }
 
         if self.focus() != AppFocus::App {
@@ -825,26 +827,32 @@ impl App<'_, '_> {
             }
         }
 
-        let maybe_terminal_event = term::read_event_with_timeout(if backend_resp_available {
+        // Process all terminal events until a timeout occurs
+        let mut timeout = if backend_resp_available {
             time::Duration::from_secs(0)
         } else {
             UI_POLL_DURATION
-        })?;
-        let terminal_event_available = maybe_terminal_event.is_some();
+        };
+        let mut terminal_event_available = false;
+        loop {
+            let maybe_terminal_event = term::read_event_with_timeout(timeout)?;
+            terminal_event_available |= maybe_terminal_event.is_some();
+            timeout = time::Duration::from_secs(0);
 
-        if let Some(event) = maybe_terminal_event {
-            if let Event::Key(key_event) = event {
-                self.handle_global_key_event(key_event)
-            }
+            if let Some(event) = maybe_terminal_event {
+                if let Event::Key(key_event) = event {
+                    self.handle_global_key_event(key_event)
+                }
 
-            match self.focus() {
-                AppFocus::App => self.handle_normal_event(event),
-                AppFocus::BPMInput => self.handle_bpm_input_key_event(event),
-                AppFocus::Measure(index) => self.handle_measure_input_key_event(index, event),
+                match self.focus() {
+                    AppFocus::App => self.handle_normal_event(event),
+                    AppFocus::BPMInput => self.handle_bpm_input_key_event(event),
+                    AppFocus::Measure(index) => self.handle_measure_input_key_event(index, event),
+                }
+            } else {
+                return Ok(backend_resp_available | terminal_event_available);
             }
         }
-
-        Ok(backend_resp_available | terminal_event_available)
     }
 
     fn handle_global_key_event(&mut self, key_event: KeyEvent) {
@@ -877,8 +885,14 @@ impl App<'_, '_> {
                     }
                 },
                 (Char('a'), _) => {
-                    let measure_index = self.add_measure(String::from("1:"), None);
+                    let measure_index =
+                        self.add_measure(self.measures.len(), String::from("1:"), None);
                     self.focus.push(AppFocus::Measure(measure_index));
+                }
+                (Char('c'), _) => {
+                    if let AppFocus::Measure(measure_index) = self.selection {
+                        self.clone_measure(measure_index);
+                    }
                 }
                 (Char('x'), _) => {
                     if let AppFocus::Measure(measure_index) = self.selection {
@@ -1003,18 +1017,30 @@ impl App<'_, '_> {
         self.selection = new_active_measure;
     }
 
-    fn add_measure(&mut self, source: String, sequence: Option<Sequence>) -> usize {
-        self.measures.push(Measure {
-            id: self.next_measure_id,
-            input: MeasureInput::new(&source),
-            source,
-            sequence: sequence.unwrap_or_else(|| Sequence::new([])),
-        });
-        self.selection = AppFocus::Measure(self.measures.len() - 1);
+    fn add_measure(&mut self, index: usize, source: String, sequence: Option<Sequence>) -> usize {
+        self.measures.insert(
+            index,
+            Measure {
+                id: self.next_measure_id,
+                input: MeasureInput::new(&source),
+                source,
+                sequence: sequence.unwrap_or_else(|| Sequence::new([])),
+            },
+        );
+        self.selection = AppFocus::Measure(index);
         self.next_measure_id += 1;
         self.update_sequences();
 
-        self.measures.len() - 1
+        index
+    }
+
+    fn clone_measure(&mut self, index: usize) -> usize {
+        let existing_measure = &self.measures[index];
+        self.add_measure(
+            index + 1,
+            existing_measure.source.clone(),
+            Some(existing_measure.sequence.clone()),
+        )
     }
 
     fn delete_measure(&mut self, index: usize) {
