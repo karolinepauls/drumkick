@@ -322,9 +322,9 @@ impl Machine {
         let buf_end_beat_global = buf_start_beat_global + buffer_duration_in_beats;
 
         for (seq_id, sequence) in self.state.params.sequences.iter_mut() {
-            if self.state.params.playing {
+            if self.state.params.playing && !sequence.items.is_empty() {
                 let sequence_start_diff =
-                    buf_start_beat_global.beats() % sequence.beat_count() as u64;
+                    buf_start_beat_global.beats() % u64::from(sequence.beat_count());
                 let sequence_start_beat = buf_start_beat_global.beats() - sequence_start_diff;
 
                 let mut item_index = sequence.items.partition_point(|item| {
