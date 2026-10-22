@@ -247,6 +247,7 @@ impl MeasureInput<'_> {
 
         textarea.set_block(Block::new().padding(Padding::uniform(MEASURE_PADDING)));
         textarea.set_wrap_mode(WrapMode::Word);
+        textarea.move_cursor(CursorMove::Head);
 
         let mut input = Self {
             input: textarea,
