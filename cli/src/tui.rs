@@ -348,18 +348,27 @@ struct Measure<'i> {
     sequence: Sequence,
 }
 
-#[derive(Debug)]
-enum Dir {
-    Up,
-    Down,
-}
-
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
-enum AppFocus {
+enum Selection {
     #[default]
     App,
-    BPMInput,
-    Measure(usize),
+    BPMInput {
+        focus: bool,
+    },
+    Measure {
+        index: usize,
+        focus: bool,
+    },
+}
+
+impl Selection {
+    /// Check if there is any input focus (keys don't go to the main view)
+    fn is_focused(&self) -> bool {
+        match self {
+            Self::App => false,
+            Self::BPMInput { focus } | Self::Measure { focus, .. } => *focus,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -379,10 +388,8 @@ pub struct App<'bpm, 'measure> {
     error: Option<String>,
     debug_messages: VecDeque<String>,
     bpm_input: BPMInput<'bpm>,
-    /// Menu navigation
-    selection: AppFocus,
-    /// Input focus
-    focus: Vec<AppFocus>,
+    /// Menu navigation and input focus
+    selection: Vec<Selection>,
     next_measure_id: u64,
     measures: Vec<Measure<'measure>>,
     samples: IndexMap<String, Arc<LoadedSource>>,
@@ -402,8 +409,7 @@ impl App<'_, '_> {
             error: None,
             debug_messages: VecDeque::new(),
             bpm_input: input,
-            focus: vec![AppFocus::default()],
-            selection: AppFocus::App,
+            selection: vec![],
             next_measure_id: 0,
             measures: Vec::new(),
             samples: track.samples,
@@ -413,7 +419,6 @@ impl App<'_, '_> {
             track.measure_beats.to_source(),
             Some(track.sequence),
         );
-        app.selection = AppFocus::App;
         Ok(app)
     }
 
@@ -423,19 +428,32 @@ impl App<'_, '_> {
     ) -> Result<(), Box<dyn std::error::Error>> {
         while !self.exit {
             self.propagate();
-            self.adjust_scroll_offset_for_selection(terminal.size()?);
+
+            let measures_block_height = Self::calculate_measures_block_height(terminal.size()?);
+            self.adjust_scroll_offset_for_selection(measures_block_height);
             terminal.draw(|frame| self.draw(frame))?;
 
             let mut event_received = false;
             while !event_received {
-                event_received = self.handle_events()?;
+                event_received = self.handle_events(measures_block_height)?;
             }
         }
         Ok(())
     }
 
-    fn focus(&self) -> AppFocus {
-        self.focus.last().map_or_default(|f| f.to_owned())
+    fn selection(&self) -> Selection {
+        self.selection.last().map_or_default(|f| f.to_owned())
+    }
+
+    // Set selection, in-place.
+    //
+    // In order to manage the selection/focus stack, push to/pop from the vector.
+    fn replace_selection(&mut self, new_focus: Selection) {
+        if let Some(current) = self.selection.last_mut() {
+            *current = new_focus;
+        } else {
+            self.selection.push(new_focus);
+        }
     }
 
     /// Send data to child widgets.
@@ -455,51 +473,49 @@ impl App<'_, '_> {
             measure.input.set_muted(measure.sequence.muted);
         }
 
-        // Mark selected measure (unless editing BPM)
-        match self.selection {
-            AppFocus::App => {}
-            AppFocus::BPMInput => {
-                self.bpm_input.set_selected(true);
-            }
-            AppFocus::Measure(measure_index) => {
-                self.measures
-                    .get_mut(measure_index)
-                    .expect("selected measure")
-                    .input
-                    .set_selected(true);
-            }
-        }
-
         // Mark focused input (will render a cursor)
-        match self.focus() {
-            AppFocus::App => {}
-            AppFocus::BPMInput => {
-                self.bpm_input.set_focused(true);
+        match self.selection() {
+            Selection::App => {}
+            Selection::BPMInput { focus } => {
+                self.bpm_input.set_selected(true);
+                if focus {
+                    self.bpm_input.set_focused(true);
+                }
             }
-            AppFocus::Measure(n) => {
-                let measure = self.measures.get_mut(n).expect("focused measure");
-                measure.input.set_focused(true);
+            Selection::Measure { index, focus } => {
+                let measure = self.measures.get_mut(index).expect("focused measure");
+                measure.input.set_selected(true);
+                if focus {
+                    measure.input.set_focused(true);
+                }
             }
         }
     }
 
-    fn adjust_scroll_offset_for_selection(&mut self, size: Size) {
-        if let AppFocus::Measure(index) = self.selection {
-            let (AppLayout { measures_rect, .. }, _) =
-                Self::app_level_layout(Rect::new(0, 0, size.width, size.height));
+    fn calculate_measures_block_height(size: Size) -> u16 {
+        let (AppLayout { measures_rect, .. }, _) =
+            Self::app_level_layout(Rect::new(0, 0, size.width, size.height));
 
-            let useful_height = measures_rect
-                .height
-                .saturating_sub(MEASURES_BLOCK_PADDING * 2)
-                .saturating_sub(1); // top border
+        measures_rect
+            .height
+            .saturating_sub(MEASURES_BLOCK_PADDING * 2)
+            .saturating_sub(1) // correct for top border
+    }
+
+    fn calculate_measure_content_height(&self) -> u16 {
+        (self.measures.len() as u16).saturating_mul(MEASURE_HEIGHT)
+    }
+
+    fn adjust_scroll_offset_for_selection(&mut self, measures_block_height: u16) {
+        if let Selection::Measure { index, .. } = self.selection() {
             let selected_item_top = (index as u16).saturating_mul(MEASURE_HEIGHT);
             let selected_item_bottom = selected_item_top.saturating_add(MEASURE_HEIGHT);
 
             let display_top = self.scroll_offset;
-            let display_bottom = self.scroll_offset.saturating_add(useful_height);
+            let display_bottom = self.scroll_offset.saturating_add(measures_block_height);
 
             if selected_item_bottom > display_bottom {
-                self.scroll_offset = selected_item_bottom.saturating_sub(useful_height);
+                self.scroll_offset = selected_item_bottom.saturating_sub(measures_block_height);
             } else if selected_item_top < display_top {
                 self.scroll_offset = selected_item_top;
             }
@@ -509,7 +525,9 @@ impl App<'_, '_> {
     fn general_instructions(&self) -> Line<'_> {
         let mut instructions: Vec<Span> = vec![" ".into()];
 
-        if self.focus() == AppFocus::App {
+        let focused = self.selection().is_focused();
+
+        if !focused {
             instructions.append(&mut vec![
                 "Space".blue().bold(),
                 ": Play/Pause  ".into(),
@@ -520,7 +538,7 @@ impl App<'_, '_> {
             ]);
         }
 
-        if self.focus() == AppFocus::App {
+        if !focused {
             instructions.push("Q/^c".blue().bold());
         } else {
             instructions.push("^c".blue().bold());
@@ -630,20 +648,20 @@ impl App<'_, '_> {
         let measures_rect = measures_and_scrollbar_layout[0];
         let scrollbar_rect = measures_and_scrollbar_layout[1];
 
-        let content_length = self.measures.len().saturating_mul(MEASURE_HEIGHT.into());
+        let content_length = self.calculate_measure_content_height();
 
         // Scrollbar
         let mut scrollbar_state = ScrollbarState::new(
             // Weird but needed to make the scrollbar act correctly. The content length passed into
             // the scrollbar has to be "the length that doesn't fit".
-            content_length.saturating_sub(measures_rect.height.into()),
+            content_length.saturating_sub(measures_rect.height).into(),
         )
         .position(self.scroll_offset.into())
         .viewport_content_length(measures_rect.height.into());
         frame.render_stateful_widget(Scrollbar::default(), scrollbar_rect, &mut scrollbar_state);
 
         // Scrolled measure list
-        let scroll_buf_rect = Rect::new(0, 0, measures_rect.width, content_length as u16);
+        let scroll_buf_rect = Rect::new(0, 0, measures_rect.width, content_length);
         let mut scroll_buf = Buffer::empty(scroll_buf_rect);
 
         let measure_list_constraints = vec![Constraint::Max(3); self.measures.len()];
@@ -686,7 +704,7 @@ impl App<'_, '_> {
     }
 
     fn context_info(&self) -> Option<Line<'_>> {
-        if let AppFocus::Measure(_) = self.focus() {
+        if let Selection::Measure { .. } = self.selection() {
             let mut line = Line::default();
             line.push_span(Span::from("Available samples: "));
 
@@ -753,18 +771,19 @@ impl App<'_, '_> {
     }
 
     fn draw_action_instructions(&self, frame: &mut Frame, rect: Rect) {
+        let selection_focused = self.selection().is_focused();
         let mut line_elements: Vec<Span> = vec![];
 
-        if self.focus() == AppFocus::App {
+        if !selection_focused {
             line_elements.append(&mut vec!["Up/Down".bold(), ": Navigate".into()]);
         }
 
-        let action_str = match (self.selection, self.focus()) {
-            (_, AppFocus::BPMInput) => "Apply BPM",
-            (_, AppFocus::Measure(_)) => "Apply measure",
-            (AppFocus::App, AppFocus::App) => "",
-            (AppFocus::BPMInput, _) => "Edit BPM",
-            (AppFocus::Measure(_), _) => "Edit",
+        let action_str = match self.selection() {
+            Selection::BPMInput { focus: false } => "Edit BPM",
+            Selection::BPMInput { focus: true } => "Apply BPM",
+            Selection::Measure { focus: false, .. } => "Edit", // No "measure" to preserve space
+            Selection::Measure { focus: true, .. } => "Apply measure",
+            Selection::App => "",
         };
 
         if !action_str.is_empty() {
@@ -776,10 +795,12 @@ impl App<'_, '_> {
             ]);
         }
 
-        if self.focus() == AppFocus::App
-            && let AppFocus::Measure(n) = self.selection
+        if let Selection::Measure {
+            index,
+            focus: false,
+        } = self.selection()
         {
-            let measure = &self.measures[n];
+            let measure = &self.measures[index];
 
             line_elements.append(&mut vec![
                 "  ".into(),
@@ -798,7 +819,7 @@ impl App<'_, '_> {
             line_elements.append(&mut vec!["  ".into(), "X".bold(), ": Delete".into()]);
         }
 
-        if self.focus() != AppFocus::App {
+        if selection_focused {
             line_elements.append(&mut vec!["  ".into(), "Esc".bold(), ": Cancel".into()]);
         }
 
@@ -811,7 +832,7 @@ impl App<'_, '_> {
         );
     }
 
-    fn handle_events(&mut self) -> io::Result<bool> {
+    fn handle_events(&mut self, measures_block_height: u16) -> io::Result<bool> {
         let mut backend_resp_available = self.drumkick.playback_state_updated();
         for resp in self.drumkick.iter_resposes() {
             backend_resp_available = true;
@@ -844,10 +865,12 @@ impl App<'_, '_> {
                     self.handle_global_key_event(key_event)
                 }
 
-                match self.focus() {
-                    AppFocus::App => self.handle_normal_event(event),
-                    AppFocus::BPMInput => self.handle_bpm_input_key_event(event),
-                    AppFocus::Measure(index) => self.handle_measure_input_key_event(index, event),
+                match self.selection() {
+                    Selection::BPMInput { focus: true } => self.handle_bpm_input_key_event(event),
+                    Selection::Measure {
+                        focus: true, index, ..
+                    } => self.handle_measure_input_key_event(index, event),
+                    _ => self.handle_normal_event(event, measures_block_height),
                 }
             } else {
                 return Ok(backend_resp_available | terminal_event_available);
@@ -861,7 +884,8 @@ impl App<'_, '_> {
         }
     }
 
-    fn handle_normal_event(&mut self, event: Event) {
+    fn handle_normal_event(&mut self, event: Event, measures_block_height: u16) {
+        let measures_per_page = measures_block_height / MEASURE_HEIGHT;
         if let Event::Key(key_event) = event {
             match (key_event.code, key_event.modifiers) {
                 (Char('q'), _) => self.exit(),
@@ -869,39 +893,56 @@ impl App<'_, '_> {
                 (Char('+') | Char('='), _) => self.change_bpm(5.0),
                 (Char('-') | Char('_'), _) => self.change_bpm(-5.0),
                 (Char('b'), _) => {
-                    self.selection = AppFocus::BPMInput;
-                    self.focus.push(AppFocus::BPMInput);
+                    self.selection.push(Selection::BPMInput { focus: true });
                 }
 
-                (KeyCode::Up, _) => self.navigate_measure_selection(Dir::Up),
-                (KeyCode::Down, _) => self.navigate_measure_selection(Dir::Down),
-                (KeyCode::Enter, _) => match self.selection {
-                    AppFocus::App => {}
-                    AppFocus::BPMInput => {
-                        self.focus.push(AppFocus::BPMInput);
+                (KeyCode::Up, _) => self.navigate_selection(-1),
+                (KeyCode::Down, _) => self.navigate_selection(1),
+                (KeyCode::PageUp, _) => {
+                    self.scroll_offset = self.scroll_offset.saturating_sub(measures_block_height);
+                    self.navigate_measure_only_selection(-(measures_per_page as isize));
+                }
+                (KeyCode::PageDown, _) => {
+                    self.scroll_offset = self
+                        .scroll_offset
+                        .saturating_add(measures_block_height)
+                        .min(
+                            self.calculate_measure_content_height()
+                                .saturating_sub(measures_block_height),
+                        );
+
+                    self.navigate_measure_only_selection(measures_per_page as isize);
+                }
+                (KeyCode::Enter, _) => match self.selection() {
+                    Selection::App => {}
+                    Selection::BPMInput { .. } => {
+                        self.selection.push(Selection::BPMInput { focus: true });
                     }
-                    AppFocus::Measure(measure_index) => {
-                        self.focus.push(AppFocus::Measure(measure_index));
+                    Selection::Measure { index, .. } => {
+                        self.selection
+                            .push(Selection::Measure { index, focus: true });
                     }
                 },
                 (Char('a'), _) => {
-                    let measure_index =
-                        self.add_measure(self.measures.len(), String::from("1:"), None);
-                    self.focus.push(AppFocus::Measure(measure_index));
+                    let index = self.add_measure(self.measures.len(), String::from("1:"), None);
+                    self.selection.push(Selection::Measure {
+                        index,
+                        focus: false,
+                    });
                 }
                 (Char('c'), _) => {
-                    if let AppFocus::Measure(measure_index) = self.selection {
-                        self.clone_measure(measure_index);
+                    if let Selection::Measure { index, .. } = self.selection() {
+                        self.clone_measure(index);
                     }
                 }
                 (Char('x'), _) => {
-                    if let AppFocus::Measure(measure_index) = self.selection {
-                        self.delete_measure(measure_index);
+                    if let Selection::Measure { index, .. } = self.selection() {
+                        self.delete_measure(index);
                     }
                 }
                 (Char('m'), _) => {
-                    if let AppFocus::Measure(measure_index) = self.selection {
-                        self.mute_unmute_measure(measure_index);
+                    if let Selection::Measure { index, .. } = self.selection() {
+                        self.mute_unmute_measure(index);
                     }
                 }
                 _ => {}
@@ -915,11 +956,11 @@ impl App<'_, '_> {
             InputEditEffect::Editing => {}
             InputEditEffect::Aborted => {
                 self.bpm_input.set_content(&self.drumkick.bpm().to_string());
-                self.focus.pop();
+                self.selection.pop();
             }
             InputEditEffect::Applied(bpm) => {
                 self.set_bpm(bpm);
-                self.focus.pop();
+                self.selection.pop();
             }
             InputEditEffect::Error(err) => {
                 self.set_error(err);
@@ -938,7 +979,7 @@ impl App<'_, '_> {
             InputEditEffect::Editing => {}
             InputEditEffect::Aborted => {
                 measure.input.set_content(&measure.source);
-                self.focus.pop();
+                self.selection.pop();
             }
             InputEditEffect::Applied((source, beat_specs)) => {
                 match samples::arrange_samples_into_sequence_items(&beat_specs, &self.samples) {
@@ -948,7 +989,7 @@ impl App<'_, '_> {
                         measure.sequence.items = items;
                         self.update_sequences();
                         self.clear_error();
-                        self.focus.pop();
+                        self.selection.pop();
                     }
                 }
             }
@@ -992,30 +1033,60 @@ impl App<'_, '_> {
         self.bpm_input.set_content(&self.drumkick.bpm().to_string());
     }
 
-    fn navigate_measure_selection(&mut self, dir: Dir) {
-        let shifted_selection = match self.selection {
-            AppFocus::BPMInput => 0,
-            AppFocus::App => 1,
-            AppFocus::Measure(measure_index) => measure_index + 2,
+    fn navigate_selection(&mut self, step: isize) {
+        let non_measure_positions = 2;
+        let shifted_selection = match self.selection() {
+            Selection::BPMInput { .. } => 0,
+            Selection::App => 1,
+            Selection::Measure { index, .. } => index + non_measure_positions,
         };
-
-        let new_active_measure_shifted = match dir {
-            Dir::Up => shifted_selection.saturating_sub(1),
-            Dir::Down => shifted_selection.saturating_add(1),
-        };
+        let new_active_measure_shifted = shifted_selection.saturating_add_signed(step);
 
         let new_active_measure = match new_active_measure_shifted {
-            0 => AppFocus::BPMInput,
-            1 => AppFocus::App,
-            _ if self.measures.is_empty() => AppFocus::App,
+            0 => Selection::BPMInput { focus: false },
+            1 => Selection::App,
+            _ if self.measures.is_empty() => Selection::App,
             n => {
                 let max_bound = self.measures.len() - 1;
-                let index = (n - 2).min(max_bound);
-                AppFocus::Measure(index)
+                let index = (n - non_measure_positions).min(max_bound);
+                Selection::Measure {
+                    index,
+                    focus: false,
+                }
             }
         };
 
-        self.selection = new_active_measure;
+        self.replace_selection(new_active_measure);
+    }
+
+    /// Navigate up/down within the measures block.
+    fn navigate_measure_only_selection(&mut self, step: isize) {
+        fn is_measure(selection: Selection) -> bool {
+            matches!(selection, Selection::Measure { .. })
+        }
+
+        if self.measures.is_empty() {
+            return;
+        }
+
+        // Page Down but measures are not selected - select measure 0 before
+        if step > 0 && !is_measure(self.selection()) {
+            self.replace_selection(Selection::Measure {
+                index: 0,
+                focus: false,
+            });
+        }
+
+        let prev_selection = self.selection();
+        self.navigate_selection(step);
+
+        // Make sure that Page Up won't navigate past measure 0 into the app/bpm
+        if step < 0 && is_measure(prev_selection) && !is_measure(self.selection()) {
+            self.replace_selection(Selection::Measure {
+                index: 0,
+                focus: false,
+            });
+        }
     }
 
     fn add_measure(&mut self, index: usize, source: String, sequence: Option<Sequence>) -> usize {
@@ -1028,7 +1099,10 @@ impl App<'_, '_> {
                 sequence: sequence.unwrap_or_else(|| Sequence::new([])),
             },
         );
-        self.selection = AppFocus::Measure(index);
+        self.replace_selection(Selection::Measure {
+            index,
+            focus: false,
+        });
         self.next_measure_id += 1;
         self.update_sequences();
 
@@ -1048,9 +1122,12 @@ impl App<'_, '_> {
         self.measures.remove(index);
         let measure_count = self.measures.len();
         if measure_count > 0 {
-            self.selection = AppFocus::Measure(index.min(self.measures.len() - 1));
+            self.replace_selection(Selection::Measure {
+                index: index.min(self.measures.len() - 1),
+                focus: false,
+            });
         } else {
-            self.selection = AppFocus::App;
+            self.replace_selection(Selection::App);
         }
         self.update_sequences();
     }
