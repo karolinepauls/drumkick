@@ -2,22 +2,34 @@ use cpal::{FromSample, SizedSample};
 use std::default::Default;
 use std::fmt;
 use std::io::Cursor;
+use std::path::PathBuf;
 use std::sync::Arc;
 use symphonia::core::audio::GenericAudioBufferRef;
 use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
-use symphonia::core::errors::Error as SymphoniaError;
+pub use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatReader, TrackType};
 use symphonia::core::io::MediaSourceStream;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceOrigin {
+    File(PathBuf),
+    Builtin(String),
+}
+
 pub struct LoadedSource {
     pub(crate) samples: Vec<f32>,
-    pub(crate) channels: usize,
-    pub(crate) sample_rate: u32,
+    pub channels: usize,
+    pub sample_rate: u32,
+    pub origin: Option<SourceOrigin>,
 }
 impl LoadedSource {
     pub fn duration(&self) -> f64 {
         self.samples.len() as f64 / self.sample_rate as f64
+    }
+
+    pub fn with_origin(self, origin: Option<SourceOrigin>) -> Self {
+        Self { origin, ..self }
     }
 }
 
@@ -36,6 +48,7 @@ pub struct StreamingSource<'a> {
     pub channels_hint: Option<usize>,
     pub num_frames_hint: Option<u64>,
     pub track_id: u32,
+    pub origin: Option<SourceOrigin>,
     format: Box<dyn FormatReader + 'a>,
     decoder: Box<dyn AudioDecoder>,
 }
@@ -61,7 +74,7 @@ impl<'a> StreamingSource<'a> {
             hint.with_extension(ext);
         }
 
-        Self::from_file(file)
+        Self::from_file(file).map(|s| s.with_origin(Some(SourceOrigin::File(path.into()))))
     }
 
     pub fn from_file(file: std::fs::File) -> Result<Self, SymphoniaError> {
@@ -110,12 +123,18 @@ impl<'a> StreamingSource<'a> {
             format,
             decoder,
             track_id,
+            origin: None,
         })
+    }
+
+    pub fn with_origin(self, origin: Option<SourceOrigin>) -> Self {
+        Self { origin, ..self }
     }
 
     /// Read the entire track into memory, consuming the source
     pub fn into_loaded(mut self) -> Result<LoadedSource, SymphoniaError> {
         self.load_without_rewinding()
+            .map(|l| l.with_origin(self.origin))
     }
 
     fn load_without_rewinding(&mut self) -> Result<LoadedSource, SymphoniaError> {
@@ -142,6 +161,7 @@ impl<'a> StreamingSource<'a> {
                         samples,
                         sample_rate,
                         channels,
+                        origin: None,
                     });
                 }
             }
@@ -253,7 +273,9 @@ fn interpolate_frame(previous: f32, current: f32, next_1: f32, next_2: f32, frac
     ((c3 * fraction + c2) * fraction + c1) * fraction + c0
 }
 
-pub fn load_from_path(path: &str) -> Result<Arc<LoadedSource>, SymphoniaError> {
+pub fn load_from_path(
+    path: impl AsRef<std::path::Path>,
+) -> Result<Arc<LoadedSource>, SymphoniaError> {
     StreamingSource::from_path(path)?
         .into_loaded()
         .map(Arc::new)
@@ -261,9 +283,11 @@ pub fn load_from_path(path: &str) -> Result<Arc<LoadedSource>, SymphoniaError> {
 
 pub fn load_from_cursor(
     cursor: Cursor<&'static [u8]>,
+    origin: &str,
 ) -> Result<Arc<LoadedSource>, SymphoniaError> {
     let media_source = MediaSourceStream::new(Box::new(cursor), Default::default());
     StreamingSource::from_media_source(media_source)?
+        .with_origin(Some(SourceOrigin::Builtin(origin.to_string())))
         .into_loaded()
         .map(Arc::new)
 }

@@ -4,7 +4,7 @@ use pest::error::Error as PestError;
 use pest::iterators::Pair;
 use pest_derive::Parser as PestParser;
 use std::collections::HashMap;
-use std::fmt;
+use std::fmt::{self, Write};
 use std::num::NonZeroU32;
 use std::sync::LazyLock;
 use thiserror::Error;
@@ -230,6 +230,7 @@ fn rename_rule(rule: &Rule, all_sample_names: &[&str]) -> String {
         Rule::placement => "placement (e.g. `1`, `and`, `1/3`)".to_string(),
         Rule::beat => "beat (e.g. `1:kick,hat`)".to_string(),
         Rule::measure => "measure (e.g. `1:kick 2:kick,snare, ...``".to_string(),
+        Rule::just_sample_name => "sample name".to_string(),
         Rule::EOI => "end of input".to_string(),
     }
 }
@@ -247,6 +248,87 @@ pub fn parse_measure(
         .and_then(|mut grammar| {
             parse_measure_ast(grammar.next().unwrap()).map_err(MeasureParseError::LogicalError)
         })
+}
+
+#[derive(Error, Debug, PartialEq)]
+#[error("position: {position}: {message}")]
+pub struct SampleValidationError {
+    pub position: usize,
+    pub message: String,
+}
+
+impl SampleValidationError {
+    fn new(position: usize, message: String) -> Self {
+        Self { position, message }
+    }
+}
+
+pub fn validate_sample_name(name: &str) -> Result<&str, SampleValidationError> {
+    if name.is_empty() {
+        return Err(SampleValidationError::new(0, String::from("name is empty")));
+    }
+
+    let leading_whitespace_chars = name.find(|c: char| !c.is_whitespace()).unwrap_or(0);
+    let name = name.trim();
+
+    if name.is_empty() {
+        return Err(SampleValidationError::new(0, String::from("name is blank")));
+    }
+
+    // Superior way to get character-level errors - maybe it should be used when parsing
+    if let Err(err) = MeasureGrammar::parse(Rule::just_sample_name, name) {
+        let attempts = err.parse_attempts();
+        match attempts {
+            Some(attempts) => {
+                let mut message = String::new();
+
+                let mut wrote_tokens = false;
+                for (tokens, label) in [
+                    (attempts.unexpected_tokens(), "unexpected"),
+                    (attempts.expected_tokens(), "expected"),
+                ] {
+                    if !tokens.is_empty() {
+                        wrote_tokens = true;
+                        write!(message, "{label}: ").expect("write to a String");
+                        for token in tokens {
+                            write!(message, "{}, ", token).expect("write to a String");
+                        }
+                    }
+                }
+                if wrote_tokens {
+                    message.truncate(message.len() - 2);
+                }
+
+                Err(SampleValidationError::new(
+                    leading_whitespace_chars + attempts.max_position,
+                    message,
+                ))
+            }
+            None => {
+                // realistically unreachable since parse_attempts will be None only for CustomError
+                Err(SampleValidationError::new(0, String::from("syntax error")))
+            }
+        }
+    } else {
+        Ok(name)
+    }
+}
+
+pub fn clean_sample_name(name: &str) -> String {
+    let mut clean = String::new();
+
+    for ch in name.chars() {
+        clean.push(ch);
+        if validate_sample_name(&clean).is_err() {
+            clean.pop();
+        }
+    }
+
+    if clean.is_empty() {
+        clean.push_str("noname");
+    }
+
+    clean
 }
 
 #[cfg(test)]
@@ -580,5 +662,15 @@ mod test {
             expected_error,
             syntax_error
         );
+    }
+
+    #[rstest]
+    #[case("abc", "abc")]
+    #[case("abc1", "abc1")]
+    #[case("abc-1", "abc-1")]
+    #[case("1abc", "abc")]
+    #[case::empty("", "noname")]
+    fn test_clean_sample_name(#[case] input: &str, #[case] expected: &str) {
+        assert_eq!(clean_sample_name(input), expected);
     }
 }

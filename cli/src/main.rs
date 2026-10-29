@@ -2,10 +2,16 @@ mod cli;
 mod parsing;
 mod term;
 mod tui;
-use clap::{Parser, value_parser};
+use clap::{
+    Parser,
+    builder::{OsStringValueParser, TypedValueParser},
+    value_parser,
+};
 use indexmap::IndexMap;
+use std::path::{Component, Path, PathBuf, absolute};
 
 use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::fmt;
 use thiserror::Error;
 
@@ -27,6 +33,40 @@ impl ExitCodes {
     fn code(&self) -> i32 {
         *self as i32
     }
+}
+
+/// Resolves ".." without resolving symlinks.
+fn normalise_curdir_and_parent_dir(path: &Path) -> PathBuf {
+    let mut new_path = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                new_path.pop();
+            }
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => new_path.push(comp),
+        }
+    }
+    new_path
+}
+
+/// Breaks a "name=path" string into parts.
+fn parse_pair(s: &OsStr) -> Result<(String, PathBuf), String> {
+    let bytes = s.as_encoded_bytes();
+    let i = bytes.iter().position(|&b| b == b'=').ok_or_else(|| {
+        format!(
+            "expected name=path, got {}",
+            backtick_quote(&s.to_string_lossy())
+        )
+    })?;
+
+    let name = std::str::from_utf8(&bytes[..i]).map_err(|e| e.to_string())?;
+    // Unfortunately, there is no safe and portable way to build a path from bytes.
+    let path = unsafe { OsStr::from_encoded_bytes_unchecked(&bytes[i + 1..]) };
+
+    let abspath = absolute(path).map_err(|e| e.to_string())?;
+    let normalised = normalise_curdir_and_parent_dir(&abspath);
+    Ok((name.to_owned(), normalised))
 }
 
 #[derive(Parser, Debug)]
@@ -68,9 +108,10 @@ Other samples must be provided using --sample options.
         short = 's',
         long = "sample",
         help = "Sample name and location, e.g.: `-s kick=\"sample_path/kick.flac\"`
-This will result in the `kick` sample being available in the `MEASURE` argument."
+This will result in the `kick` sample being available in the `MEASURE` argument.",
+        value_parser = OsStringValueParser::new().try_map(|s| parse_pair(&s)),
     )]
-    samples: Vec<String>,
+    samples: Vec<(String, PathBuf)>,
 
     #[arg(short, long, default_value_t = 60.0)]
     bpm: f64,
@@ -93,7 +134,7 @@ being given insufficient time to produce the audio wave, resulting in buffer und
 struct TrackSpec<'a> {
     bpm: f64,
     measure_beats: Vec<BeatSpec>,
-    sample_locations: IndexMap<&'a str, &'a str>,
+    sample_locations: IndexMap<&'a str, &'a Path>,
 }
 
 #[derive(Error, Debug)]
@@ -162,67 +203,63 @@ fn init() -> Result<(Args, DrumkickOpts, InitialState), Box<dyn std::error::Erro
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (args, opts, track) = init()?;
-    eprintln!("Measure has {} beats", track.sequence.beat_count());
+    let (args, opts, initial_state) = init()?;
+    eprintln!("Measure has {} beats", initial_state.sequence.beat_count());
 
     if args.headless {
-        cli::run_cli(opts, track)
+        cli::run_cli(opts, initial_state)
     } else {
-        tui::run_tui(opts, track)
+        tui::run_tui(opts, initial_state)
     }
-}
-
-/// Produce a map of sample names to sample paths
-fn parse_sample_locations(
-    samples: &[String],
-) -> Result<IndexMap<&str, &str>, SampleLocationsError> {
-    let split_opts = samples.iter().map(|s| s.split_once('='));
-    let mut errors = Vec::new();
-    let mut split = IndexMap::new();
-    for (sample, split_opt) in samples.iter().zip(split_opts) {
-        match split_opt {
-            Some((sample, path)) => {
-                split.insert(sample, path);
-            }
-            None => errors.push(sample.to_owned()),
-        }
-    }
-
-    if !errors.is_empty() {
-        return Err(SampleLocationsError { errors });
-    }
-
-    Ok(split)
 }
 
 fn interpret_args<'a>(args: &'a Args) -> Result<TrackSpec<'a>, Box<ArgsParseError>> {
-    let sample_locations = parse_sample_locations(&args.samples);
+    let sample_locations = IndexMap::from_iter(
+        args.samples
+            .iter()
+            .map(|(name, path)| (name.as_str(), path.as_path())),
+    );
 
     // Build a vec of all sample names, embedded and provided, for error reporting.
     let mut all_sample_names = get_embedded_sample_names();
     let mut seen_sample_names: HashSet<_> = all_sample_names.iter().copied().collect();
 
     // Sample locations may have failed to load, in which case we won't append them to all_sample_names.
-    if let Ok(locations) = sample_locations.as_ref() {
-        for key in locations.keys() {
-            let new = seen_sample_names.insert(key);
-            if new {
-                all_sample_names.push(key);
-            }
+    for key in sample_locations.keys() {
+        let new = seen_sample_names.insert(key);
+        if new {
+            all_sample_names.push(key);
         }
     }
 
-    let measure_beats = parse_measure(&args.measure, &all_sample_names);
+    let measure_beats =
+        parse_measure(&args.measure, &all_sample_names).map_err(|e| ArgsParseError {
+            sample_locations: None,
+            measure_parse_errors: Some(e),
+        })?;
 
-    match (sample_locations, measure_beats) {
-        (Ok(sample_locations), Ok(measure_beats)) => Ok(TrackSpec {
-            bpm: args.bpm,
-            measure_beats,
-            sample_locations,
-        }),
-        (sample_locations, measure_beats) => Err(Box::new(ArgsParseError {
-            sample_locations: sample_locations.err(),
-            measure_parse_errors: measure_beats.err(),
-        })),
+    Ok(TrackSpec {
+        bpm: args.bpm,
+        measure_beats,
+        sample_locations,
+    })
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use rstest::*;
+
+    #[rstest]
+    #[case(PathBuf::from("/abc/../def"), PathBuf::from("/def"))]
+    #[case::parent_dir_of_root_dir_is_still_root_dir(
+        PathBuf::from("/../def"),
+        PathBuf::from("/def")
+    )]
+    #[case(PathBuf::from("/abc/def/ghi/../../"), PathBuf::from("/abc"))]
+    #[case(PathBuf::from("/abc/./def/"), PathBuf::from("/abc/def"))]
+    #[case(PathBuf::from("./abc/"), PathBuf::from("abc"))]
+    fn test_normalise_curdir_and_parent_dir(#[case] input: PathBuf, #[case] expected: PathBuf) {
+        assert_eq!(normalise_curdir_and_parent_dir(&input), expected);
     }
 }

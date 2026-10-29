@@ -9,7 +9,7 @@ mod sequence;
 pub use backend::machine::{
     BUFFER_SIZE, MAX_BPM, MIN_BPM, PlaybackProgress, Response, ResponseLevel,
 };
-pub use backend::sound::LoadedSource;
+pub use backend::sound::{LoadedSource, SourceOrigin, SymphoniaError, load_from_path};
 pub use sequence::Sequence;
 
 pub use backend::handle::{DrumkickOpts, InitialState, MachineHandle};

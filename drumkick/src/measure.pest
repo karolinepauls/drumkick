@@ -10,3 +10,4 @@ beat_fraction      = { non_zero_digit ~ "/" ~ non_zero_digit }
 placement          = { beat_fraction | beat_fraction_name | beat_no }
 beat               = { (placement ~ ":") ~ samples_list? }
 measure            = { SOI ~ " "* ~ beat ~ (" "+ ~ beat)* ~ " "* ~ EOI }
+just_sample_name   = { SOI ~ sample_name ~ EOI }

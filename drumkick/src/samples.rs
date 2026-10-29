@@ -1,4 +1,5 @@
 use indexmap::IndexMap;
+use std::path::Path;
 use std::sync::Arc;
 use symphonia::core::errors::Error as SymphoniaError;
 use thiserror::Error;
@@ -46,7 +47,7 @@ impl SampleLoadingErrors {
 
 fn load_embedded_sample(name: &str) -> Result<Option<Arc<sound::LoadedSource>>, SymphoniaError> {
     get_embedded_sample(name)
-        .map(sound::load_from_cursor)
+        .map(|c| sound::load_from_cursor(c, name))
         .transpose()
 }
 
@@ -59,7 +60,7 @@ pub fn all_available_sample_names<'a>(
 }
 
 pub fn load_samples(
-    sample_locations: &IndexMap<&str, &str>,
+    sample_locations: &IndexMap<&str, &Path>,
 ) -> Result<IndexMap<String, Arc<sound::LoadedSource>>, SampleLoadingErrors> {
     let mut name_to_sample: IndexMap<String, Arc<sound::LoadedSource>> = IndexMap::new();
     let mut errors: Vec<(&str, SymphoniaError)> = Vec::new();
@@ -139,13 +140,15 @@ pub fn load_samples_into_sequence(
 
 #[cfg(test)]
 mod test {
+    use std::path::PathBuf;
+
     use super::*;
     use indexmap::IndexSet;
     use rstest::*;
 
     use crate::beat::BeatNo;
 
-    fn sound_samples_to_bytes(samples: &Vec<f32>) -> Vec<u8> {
+    fn sound_samples_to_bytes(samples: &[f32]) -> Vec<u8> {
         samples
             .iter()
             .flat_map(|&s| s.to_ne_bytes())
@@ -161,16 +164,18 @@ mod test {
             "drip_strong.mp3",
             "drip_weak.mp3",
         ];
-        let beats_vec: Vec<(&str, String)> = files
+        let beats_vec: Vec<(&str, PathBuf)> = files
             .iter()
             .map(|&s| {
-                let mut path = parent_dir.to_string();
-                path.push_str("/samples/");
-                path.push_str(s);
+                let mut path = PathBuf::new();
+                path.push(parent_dir);
+                path.push("samples/");
+                path.push(s);
                 (s, path)
             })
             .collect();
-        let beats: IndexMap<&str, &str> = beats_vec.iter().map(|(s, p)| (*s, p.as_str())).collect();
+        let beats: IndexMap<&str, &Path> =
+            beats_vec.iter().map(|(s, p)| (*s, p.as_path())).collect();
 
         let samples = load_samples(&beats).unwrap();
 
