@@ -1126,7 +1126,7 @@ impl App<'_, '_, '_, '_> {
     }
 
     fn handle_normal_event(&mut self, event: Event, scrolly_params: AppScrollyParams) {
-        // Passing `upper_block_params` could be avoided if this returned an action instead of
+        // Passing `scrolly_params` could be avoided if this returned an action instead of
         // performing it.
         if let Event::Key(key_event) = event {
             match (key_event.code, key_event.modifiers) {
@@ -1137,7 +1137,24 @@ impl App<'_, '_, '_, '_> {
                 (Char('b'), _) => {
                     self.selection.push(Selection::BPMInput { focus: true });
                 }
-
+                // Move measure
+                (key @ (KeyCode::Up | KeyCode::Down), KeyModifiers::SHIFT) => {
+                    let step = match key {
+                        KeyCode::Up => -1,
+                        KeyCode::Down => 1,
+                        _ => unreachable!(),
+                    };
+                    if let Selection::Measure {
+                        index: prev_index, ..
+                    } = self.selection()
+                    {
+                        let new_index = self.navigate_measure_only_selection(
+                            ScrollyNav::Step(step),
+                            scrolly_params.measures,
+                        );
+                        self.measures.swap(prev_index, new_index);
+                    }
+                }
                 (KeyCode::Up, _) => self.navigate_selection(-1, scrolly_params.measures),
                 (KeyCode::Down, _) => self.navigate_selection(1, scrolly_params.measures),
                 (KeyCode::PageUp, _) => {
@@ -1243,7 +1260,11 @@ impl App<'_, '_, '_, '_> {
             InputEditEffect::Aborted => {
                 measure.input.set_textarea_text(&measure.source);
                 self.clear_error();
-                self.selection.pop();
+
+                self.replace_selection(Selection::Measure {
+                    index,
+                    focus: false,
+                });
             }
             InputEditEffect::Applied((source, beat_specs)) => {
                 match samples::arrange_samples_into_sequence_items(&beat_specs, &self.samples) {
@@ -1532,10 +1553,10 @@ impl App<'_, '_, '_, '_> {
         &mut self,
         nav: ScrollyNav,
         upper_block_params: ScrollyParams,
-    ) {
+    ) -> usize {
         // Without measures we've no business
         if self.measures.is_empty() {
-            return;
+            return 0;
         }
 
         let index = match self.selection() {
@@ -1552,6 +1573,8 @@ impl App<'_, '_, '_, '_> {
             index: scroll_outcome.index,
             focus: false,
         });
+
+        scroll_outcome.index
     }
 
     fn set_sample_index(&mut self, new_index: usize) {
