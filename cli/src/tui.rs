@@ -1275,7 +1275,10 @@ impl App<'_, '_, '_, '_> {
                         measure.beats = beat_specs;
                         self.update_sequences();
                         self.clear_error();
-                        self.selection.pop();
+                        self.replace_selection(Selection::Measure {
+                            index,
+                            focus: false,
+                        });
                     }
                 }
             }
