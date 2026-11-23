@@ -1355,7 +1355,7 @@ impl App<'_, '_, '_, '_> {
                     (KeyCode::Up, _) => {
                         let outcome = self.samples_scrolly.navigate(
                             scrolly_params,
-                            manager_selection.sample_index,
+                            manager_selection.sample_index as isize,
                             ScrollyNav::Step(-1),
                         );
                         self.set_sample_index(outcome.index);
@@ -1363,7 +1363,7 @@ impl App<'_, '_, '_, '_> {
                     (KeyCode::Down, _) => {
                         let outcome = self.samples_scrolly.navigate(
                             scrolly_params,
-                            manager_selection.sample_index,
+                            manager_selection.sample_index as isize,
                             ScrollyNav::Step(1),
                         );
                         self.set_sample_index(outcome.index);
@@ -1371,7 +1371,7 @@ impl App<'_, '_, '_, '_> {
                     (KeyCode::PageUp, _) => {
                         let outcome = self.samples_scrolly.navigate(
                             scrolly_params,
-                            manager_selection.sample_index,
+                            manager_selection.sample_index as isize,
                             ScrollyNav::PageUp,
                         );
                         self.set_sample_index(outcome.index);
@@ -1379,7 +1379,7 @@ impl App<'_, '_, '_, '_> {
                     (KeyCode::PageDown, _) => {
                         let outcome = self.samples_scrolly.navigate(
                             scrolly_params,
-                            manager_selection.sample_index,
+                            manager_selection.sample_index as isize,
                             ScrollyNav::PageDown,
                         );
                         self.set_sample_index(outcome.index);
@@ -1512,10 +1512,10 @@ impl App<'_, '_, '_, '_> {
 
     /// App-level cursor nav which can step between BPM input, app, and measures focus.
     fn navigate_selection(&mut self, step: isize, upper_block_params: ScrollyParams) {
-        let (start_index, corrected_step) = match self.selection() {
-            Selection::BPMInput { .. } => (0, step - 2),
-            Selection::App => (0, step - 1),
-            Selection::Measure { index, .. } => (index, step),
+        let start_index: isize = match self.selection() {
+            Selection::BPMInput { .. } => -2,
+            Selection::App => -1,
+            Selection::Measure { index, .. } => index as isize,
             Selection::SampleManager(_) => {
                 debug_assert!(
                     false,
@@ -1525,13 +1525,11 @@ impl App<'_, '_, '_, '_> {
             }
         };
 
-        let scroll_outcome = self.measures_scrolly.navigate(
-            upper_block_params,
-            start_index,
-            ScrollyNav::Step(corrected_step),
-        );
+        let scroll_outcome =
+            self.measures_scrolly
+                .navigate(upper_block_params, start_index, ScrollyNav::Step(step));
 
-        let new_active_measure = match scroll_outcome.condition {
+        let new_selection = match scroll_outcome.condition {
             NavCondition::Underflow(underflow) => {
                 if underflow == 1 {
                     Selection::App
@@ -1545,7 +1543,7 @@ impl App<'_, '_, '_, '_> {
             },
         };
 
-        self.replace_selection(new_active_measure);
+        self.replace_selection(new_selection);
     }
 
     /// Navigate up/down within the measures block.
@@ -1565,9 +1563,9 @@ impl App<'_, '_, '_, '_> {
         };
         // Page Down but measures are not selected - select measure 0 before
 
-        let scroll_outcome = self
-            .measures_scrolly
-            .navigate(upper_block_params, index, nav);
+        let scroll_outcome =
+            self.measures_scrolly
+                .navigate(upper_block_params, index as isize, nav);
 
         self.replace_selection(Selection::Measure {
             index: scroll_outcome.index,

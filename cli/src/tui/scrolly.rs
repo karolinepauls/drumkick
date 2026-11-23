@@ -1,3 +1,5 @@
+use std::num::TryFromIntError;
+
 use ratatui::{
     Frame,
     buffer::Buffer,
@@ -67,7 +69,7 @@ impl Scrolly {
     pub fn navigate(
         &mut self,
         params: ScrollyParams,
-        start_index: usize,
+        start_index: isize,
         dir: ScrollyNav,
     ) -> NavOutcome {
         let items_per_page = params.visible_height / params.item_height;
@@ -95,27 +97,27 @@ impl Scrolly {
     }
 
     fn navigate_by_offset(
-        &mut self,
+        &self,
         params: ScrollyParams,
-        old_index: usize,
+        start_index: isize,
         step: isize,
     ) -> NavOutcome {
-        let last_index = params.item_count.saturating_sub(1) as isize;
+        let last_index = params.item_count as isize - 1; // Can actually be -1 for an empty list.
+        let new_index_unbounded = start_index + step;
+        let new_index_under_max_bound = new_index_unbounded.clamp(isize::MIN, last_index);
 
-        let new_index_unbounded = old_index as isize + step;
-
-        let new_index_within_bounds = new_index_unbounded.clamp(0, last_index);
-
-        let condition = if new_index_unbounded < 0 {
-            NavCondition::Underflow(-new_index_unbounded as usize)
+        let condition = if new_index_under_max_bound < 0 {
+            // Underflow can happen if navigating before the initial element or if there are no
+            // elements.
+            NavCondition::Underflow(-new_index_under_max_bound as usize)
         } else if new_index_unbounded > last_index {
-            NavCondition::Overflow((new_index_unbounded - new_index_within_bounds) as usize)
+            NavCondition::Overflow((new_index_unbounded - last_index) as usize)
         } else {
             NavCondition::Normal
         };
 
         NavOutcome {
-            index: new_index_within_bounds as usize,
+            index: usize::try_from(new_index_under_max_bound).unwrap_or(0),
             condition,
         }
     }
