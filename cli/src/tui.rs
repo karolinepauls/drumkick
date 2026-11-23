@@ -876,7 +876,7 @@ impl App<'_, '_, '_, '_> {
     }
 
     fn context_info(&self) -> Option<Line<'_>> {
-        if let Selection::Measure { .. } = self.selection() {
+        if let Selection::Measure { focus: true, .. } = self.selection() {
             let mut line = Line::default();
             line.push_span(Span::from("Available samples: "));
 
